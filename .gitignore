@@ -1,0 +1,12 @@
+﻿.idea
+target
+products
+/target
+/test/out
+/test/install_target
+/test/install_future
+/test/keys
+/log_out.txt
+/log_err.txt
+/errs.txt
+*.exe.tmp
