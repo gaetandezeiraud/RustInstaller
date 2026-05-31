@@ -441,6 +441,12 @@ This closes the classic installer failure modes: half-written installs, no-undo
 patch failures, power loss, and locked/anti-virus-held files.
 
 **Additional hardening:**
+- **Single instance per install dir.** A named mutex keyed by the (normalized)
+  install path is taken for the whole install. A second installer targeting the
+  same folder refuses immediately ("Another installation for this folder is
+  already in progress.") instead of racing on `.installer_tmp` / journal /
+  backup. Different folders are independent. The OS frees the mutex on exit or
+  crash, so there's never a stale lock.
 - **Cancel** is only accepted during staging (live install untouched), so it
   can never leave a partial state.
 - **Disk full** mid-stage is detected (`ErrorKind::StorageFull` / Win32 112/39)

@@ -146,6 +146,12 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
         manifest.deleted_files.len()
     ));
 
+    // Single-instance lock per install dir: refuse a second installer touching
+    // the same target so two runs can't race on .installer_tmp / journal /
+    // backup. Held for the whole install; the OS frees it on exit or crash.
+    #[cfg(windows)]
+    let _install_lock = acquire_install_lock(&ctx.install_dir)?;
+
     if ctx.payload.force_reinstall {
         common::log::info("force_reinstall set: skipping version check, reinstalling from scratch");
     }
@@ -447,6 +453,52 @@ fn stage_file(
     }
     common::log::info(format!("staged (full): {} ({} bytes)", rel, entry.size));
     Ok(())
+}
+
+/// RAII single-instance lock for one install dir, backed by a named mutex.
+/// Existence of the named object == an installer is active for this dir. The
+/// OS destroys it when the last handle closes (normal exit OR crash), so there
+/// is never a stale lock to clean up.
+#[cfg(windows)]
+struct InstallLock(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn acquire_install_lock(install_dir: &Path) -> Result<InstallLock> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::PCWSTR;
+
+    // Normalize the path so different spellings of the same dir collide.
+    let key = install_dir.to_string_lossy().to_lowercase().replace('/', "\\");
+    let hash = blake3::hash(key.as_bytes()).to_hex();
+    // Local\ namespace = per-session, which matches our per-user installs.
+    let name = format!("Local\\RustIInstaller-Install-{}", &hash.as_str()[..32]);
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let handle = CreateMutexW(None, false, PCWSTR(wide.as_ptr()))
+            .context("create install lock mutex")?;
+        // Read last error immediately, before any other Win32 call clobbers it.
+        let already = GetLastError() == ERROR_ALREADY_EXISTS;
+        if handle.is_invalid() {
+            bail!("could not create install lock");
+        }
+        if already {
+            let _ = CloseHandle(handle);
+            common::log::warn("refused: another installer is already running for this folder");
+            bail!("Another installation for this folder is already in progress.");
+        }
+        Ok(InstallLock(handle))
+    }
 }
 
 /// Pre-flight: make sure we can create the install dir and write into it.
