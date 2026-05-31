@@ -4,20 +4,34 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Write the uninstaller binary, installer_info.json, and register the
-/// product under HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall.
+/// Write the uninstaller + metadata to a per-user data folder OUTSIDE the app
+/// directory, and register the product under
+/// HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall.
+///
+/// Keeping `uninstall.exe` + `installer_info.json` + `installer_manifest.json`
+/// in `%LOCALAPPDATA%\<publisher>\Uninstall\<product>` means a user who deletes
+/// the app folder by hand still has a working uninstaller (no orphan Add/Remove
+/// entry). Mirrors InstallShield's "Installation Information" folder.
 pub fn finalize(
     install_dir: &Path,
     payload: &InstallerPayload,
     uninstaller_bytes: &[u8],
 ) -> Result<()> {
-    let uninstaller_path = install_dir.join("uninstall.exe");
+    // Per-user uninstall data folder; fall back to the app dir only if
+    // %LOCALAPPDATA% can't be resolved (should never happen on Windows).
+    let data_dir = common::paths::uninstall_dir(&payload.publisher, &payload.product)
+        .unwrap_or_else(|| install_dir.to_path_buf());
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("create uninstall data dir {}", data_dir.display()))?;
+
+    let uninstaller_path = data_dir.join("uninstall.exe");
     fs::write(&uninstaller_path, uninstaller_bytes)
         .with_context(|| format!("write {}", uninstaller_path.display()))?;
 
     let key = registry_key_for(&payload.product);
     let info = InstallInfo {
         product: payload.product.clone(),
+        publisher: payload.publisher.clone(),
         version: payload.to_version.clone(),
         install_dir: install_dir.to_string_lossy().into_owned(),
         installed_at_unix: SystemTime::now()
@@ -28,10 +42,16 @@ pub fn finalize(
         exe: payload.manifest.exe.clone(),
         associations: payload.associations.clone(),
     };
-    // Atomic write: a half-written installer_info.json would break uninstall.
+
+    // Metadata lives in the data dir so uninstall works even if the app folder
+    // is deleted. Atomic writes: a half-written file would break uninstall.
     common::utils::write_atomic(
-        &install_dir.join("installer_info.json"),
+        &data_dir.join("installer_info.json"),
         serde_json::to_string_pretty(&info)?.as_bytes(),
+    )?;
+    common::utils::write_atomic(
+        &data_dir.join("installer_manifest.json"),
+        serde_json::to_string_pretty(&payload.manifest)?.as_bytes(),
     )?;
 
     #[cfg(windows)]
@@ -117,7 +137,7 @@ fn register_uninstall(info: &InstallInfo, uninstaller_path: &Path) -> Result<()>
             &format!("\"{}\" --silent", uninstaller_path.display()),
         );
         let _ = set_sz(hkey, "InstallLocation", &info.install_dir);
-        let _ = set_sz(hkey, "Publisher", "RustIInstaller");
+        let _ = set_sz(hkey, "Publisher", &info.publisher);
         let _ = set_sz(hkey, "InstallDate", &install_date_yyyymmdd(info.installed_at_unix));
         let _ = set_sz(hkey, "DisplayIcon", &uninstaller_path.to_string_lossy());
         let _ = set_sz(hkey, "NoModify", "1");

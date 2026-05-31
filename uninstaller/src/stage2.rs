@@ -1,31 +1,38 @@
 //! Stage 2: runs from `%TEMP%` after Stage 1 spawned us. Waits for the parent
 //! process (Stage 1) to fully exit so the `uninstall.exe` lock is released,
-//! then removes that file + the install_dir, and finally schedules our own
-//! removal via `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)` so Windows cleans
-//! us up at next reboot. No `cmd.exe`, no console flash.
+//! then removes the application dir AND the data dir (where uninstall.exe +
+//! metadata live), and finally schedules our own removal via
+//! `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)` so Windows cleans us up at next
+//! reboot. No `cmd.exe`, no console flash.
 
 use crate::ui::{self, StepCounter, UninstallParams};
 use anyhow::Result;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-pub fn run(install_dir: PathBuf, product: String, parent_pid: Option<u32>) -> Result<()> {
+pub fn run(
+    app_dir: PathBuf,
+    data_dir: PathBuf,
+    product: String,
+    parent_pid: Option<u32>,
+) -> Result<()> {
     // Continue stage 1's log file (keyed by stage 1's PID) so the whole
     // uninstall is in one %TEMP% file for support.
     let log_id = parent_pid.unwrap_or_else(std::process::id);
     common::log::init(common::log::log_path_for_stage2(log_id));
     common::log::info(format!(
-        "stage2 start: product={} install_dir={} parent_pid={:?}",
+        "stage2 start: product={} app_dir={} data_dir={} parent_pid={:?}",
         product,
-        install_dir.display(),
+        app_dir.display(),
+        data_dir.display(),
         parent_pid
     ));
 
-    let install_dir_for_worker = install_dir.clone();
-    let product_for_worker = product.clone();
+    let app_dir_w = app_dir.clone();
+    let data_dir_w = data_dir.clone();
 
     let tr = crate::ui::tr();
     let params = UninstallParams {
@@ -39,38 +46,26 @@ pub fn run(install_dir: PathBuf, product: String, parent_pid: Option<u32>) -> Re
                 wait_for_pid(pid, Duration::from_secs(10));
             }
 
-            // 5 logical steps: wait, delete uninstall.exe, delete state,
-            // delete install_dir, schedule self-delete.
             let counter = StepCounter::new(5, progress);
             counter.step(&tr.get("uninstall.waiting"));
-
-            // Delete uninstall.exe with a retry loop in case the lock isn't
-            // released immediately (AV scanner, Explorer thumb cache, etc.)
-            let uninstall_exe = install_dir_for_worker.join("uninstall.exe");
-            for _ in 0..50 {
-                if !uninstall_exe.exists() {
-                    break;
-                }
-                if fs::remove_file(&uninstall_exe).is_ok() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
             counter.step(&tr.get("uninstall.removing_uninstaller"));
-
-            // Delete installer_info.json (Stage 1 left it on purpose).
-            let _ = fs::remove_file(install_dir_for_worker.join("installer_info.json"));
             counter.step(&tr.get("uninstall.removing_state2"));
 
-            // Remove install_dir recursively, with retries.
-            for _ in 0..30 {
-                if !install_dir_for_worker.exists() {
-                    break;
+            // Remove the application dir (may be empty / already gone).
+            if !app_dir_w.as_os_str().is_empty() {
+                remove_dir_retry(&app_dir_w);
+            }
+
+            // Remove the data dir (uninstall.exe + metadata). This is where we
+            // were launched from; the running copy is the %TEMP% one, so the
+            // original is free to delete.
+            remove_dir_retry(&data_dir_w);
+            // Best-effort: prune now-empty parent folders (Uninstall, publisher).
+            if let Some(parent) = data_dir_w.parent() {
+                let _ = fs::remove_dir(parent); // "Uninstall"
+                if let Some(grand) = parent.parent() {
+                    let _ = fs::remove_dir(grand); // "<publisher>"
                 }
-                if fs::remove_dir_all(&install_dir_for_worker).is_ok() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100));
             }
             counter.step(&tr.get("uninstall.removing_install_dir"));
 
@@ -81,14 +76,25 @@ pub fn run(install_dir: PathBuf, product: String, parent_pid: Option<u32>) -> Re
 
             // Brief pause so user sees the 100% bar.
             thread::sleep(Duration::from_millis(400));
-
-            let _ = &product_for_worker;
         }),
         auto_start: true,
     };
 
     let _ = ui::run(params);
     Ok(())
+}
+
+/// Recursively remove a directory, retrying through transient locks.
+fn remove_dir_retry(dir: &Path) {
+    for _ in 0..30 {
+        if !dir.exists() {
+            return;
+        }
+        if fs::remove_dir_all(dir).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn wait_for_pid(pid: u32, timeout: Duration) {

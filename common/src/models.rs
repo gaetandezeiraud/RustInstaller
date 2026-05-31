@@ -40,6 +40,11 @@ pub enum PayloadKind {
 pub struct InstallerPayload {
     pub kind: PayloadKind,
     pub product: String,
+    /// Publisher / vendor name. Used for the per-user uninstall data folder
+    /// (`%LOCALAPPDATA%\<publisher>\Uninstall\<product>`) and the Add/Remove
+    /// Programs "Publisher" field. Mandatory at build time.
+    #[serde(default)]
+    pub publisher: String,
     pub from_version: Option<String>,
     pub to_version: String,
     pub min_installer_version: String,
@@ -82,6 +87,8 @@ pub struct SignedPayload {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InstallInfo {
     pub product: String,
+    #[serde(default)]
+    pub publisher: String,
     pub version: String,
     pub install_dir: String,
     pub installed_at_unix: i64,

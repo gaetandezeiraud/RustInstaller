@@ -29,6 +29,12 @@ pub struct PackArgs {
     #[arg(short, long)]
     pub product: String,
 
+    /// Publisher / vendor name (mandatory). Used for the per-user uninstall
+    /// data folder %LOCALAPPDATA%\<publisher>\Uninstall\<product> and the
+    /// Add/Remove Programs "Publisher" field.
+    #[arg(long)]
+    pub publisher: String,
+
     /// New version string (e.g. "1.0.1").
     #[arg(long)]
     pub to_version: String,

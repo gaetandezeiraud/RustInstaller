@@ -5,11 +5,28 @@ use common::models::{InstallInfo, Manifest};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn current_install_dir() -> Result<PathBuf> {
+/// The folder this uninstaller runs from. Since the installer places
+/// `uninstall.exe` + metadata in `%LOCALAPPDATA%\<publisher>\Uninstall\<product>`,
+/// this is the *data* dir, not the application directory. The real app
+/// directory is read from `installer_info.json` (`install_dir`).
+pub fn self_dir() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     exe.parent()
         .map(|p| p.to_path_buf())
         .context("locate uninstaller parent dir")
+}
+
+/// Remove state files written into the application directory by the installer
+/// (`version.json`, `installer_manifest.json`).
+pub fn remove_app_state_files(app_dir: &Path) -> usize {
+    let mut count = 0;
+    for extra in ["version.json", "installer_manifest.json"] {
+        let p = app_dir.join(extra);
+        if p.exists() && fs::remove_file(&p).is_ok() {
+            count += 1;
+        }
+    }
+    count
 }
 
 pub fn read_info(install_dir: &Path) -> Result<InstallInfo> {
@@ -30,18 +47,6 @@ pub fn remove_payload_files(install_dir: &Path, manifest: &Manifest) -> usize {
     let mut count = 0;
     for rel in manifest.files.keys() {
         let p = install_dir.join(rel);
-        if p.exists() && fs::remove_file(&p).is_ok() {
-            count += 1;
-        }
-    }
-    count
-}
-
-/// Remove installer state files (manifest, info, version.json).
-pub fn remove_state_files(install_dir: &Path) -> usize {
-    let mut count = 0;
-    for extra in ["version.json", "installer_manifest.json", "installer_info.json"] {
-        let p = install_dir.join(extra);
         if p.exists() && fs::remove_file(&p).is_ok() {
             count += 1;
         }

@@ -14,7 +14,7 @@ as Win32 `RT_RCDATA` resources. No network, no admin elevation, no MSI runtime.
 | `common` | lib | Manifest types (`Manifest`, `FileEntry`, `PatchInfo`, `InstallerPayload`, `SignedPayload`), BLAKE3 hashing, file scan, HDiffPatch generation wrapper. |
 | `installer_builder` | bin | Offline build tool. Generates Ed25519 keypairs and packs a directory (or a `from_dir`/`to_dir` pair) into a self-contained installer `.exe`. |
 | `installer` | bin | The installer stub. Loads its own RCDATA payload, verifies the Ed25519 signature against a public key compiled in at build time, checks per-file BLAKE3 hashes, and either fresh-extracts the zip or applies HDiffPatch deltas in place. Modernized Win32 UI (Segoe UI, license page, progress, run-now checkbox). |
-| `uninstaller` | bin | Built once by the builder and embedded as the 3rd RCDATA resource. The installer writes it to `<install_dir>\uninstall.exe` and registers it under HKCU `Software\Microsoft\Windows\CurrentVersion\Uninstall`, so the product shows up in Windows Apps. Reads the local manifest, removes every tracked file, removes the registry entry, and self-deletes via a detached `cmd /C` helper. |
+| `uninstaller` | bin | Built once by the builder and embedded as the 3rd RCDATA resource. The installer writes it to `%LOCALAPPDATA%\<publisher>\Uninstall\<product>\uninstall.exe` (outside the app folder) and registers it under HKCU `Software\Microsoft\Windows\CurrentVersion\Uninstall`, so the product shows up in Windows Apps. Reads the manifest, removes every tracked file + shortcuts + associations + registry entry, then a `%TEMP%` stage-2 copy deletes the app dir, the data dir, and itself. |
 
 ## Security model
 
@@ -68,6 +68,7 @@ compiled into every stub.
 ```pwsh
 .\target\release\installer_builder.exe pack `
     --product myapp `
+    --publisher "My Company" `
     --to-version 1.0 `
     --input .\build\myapp-1.0 `
     --exe myapp.exe `
@@ -76,11 +77,15 @@ compiled into every stub.
     --out .\dist\setup-myapp-1.0.exe
 ```
 
+`--publisher` is mandatory. It sets the Add/Remove Programs "Publisher" field
+and the per-user uninstall data folder (see Uninstall below).
+
 ### 3. Build a patch installer
 
 ```pwsh
 .\target\release\installer_builder.exe pack `
     --product myapp `
+    --publisher "My Company" `
     --from-version 1.0 --from-dir .\build\myapp-1.0 `
     --to-version   1.1 --input    .\build\myapp-1.1 `
     --exe myapp.exe `
@@ -149,19 +154,34 @@ Progress is printed to stderr, exit code is `0` on success, `1` on any failure
 
 ### Uninstall
 
-The product appears in **Windows Settings → Apps → Installed apps** (and
-classic Add/Remove Programs). Removing it from there launches
-`<install_dir>\uninstall.exe`, which:
+`uninstall.exe` and its metadata live **outside** the application folder, in a
+per-user data dir (mirrors InstallShield's "Installation Information" folder):
 
-1. Walks `installer_manifest.json` and removes every tracked file.
-2. Removes `version.json`, `installer_manifest.json`, `installer_info.json`.
-3. Removes empty subdirectories.
-4. Deletes the HKCU Uninstall registry entry.
-5. Schedules `uninstall.exe` + `install_dir` cleanup via a detached
-   `cmd /C ping ... & del & rd` so the running process can exit first.
+```
+%LOCALAPPDATA%\<publisher>\Uninstall\<product>\
+    uninstall.exe
+    installer_info.json        (holds the real install_dir)
+    installer_manifest.json
+```
 
-`uninstall.exe --silent` skips the confirmation dialog (used by the registry
-`QuietUninstallString`).
+So a user who deletes the app folder by hand still has a working uninstaller -
+**no orphan Add/Remove Programs entry**, like a commercial installer.
+
+The product appears in **Windows Settings > Apps > Installed apps** (and
+classic Add/Remove Programs). Uninstalling runs that `uninstall.exe`, which:
+
+1. Reads `installer_info.json` to find the real `install_dir`.
+2. Walks `installer_manifest.json` and removes every tracked file from the app dir.
+3. Removes desktop / Start Menu shortcuts and file associations.
+4. Removes `version.json` + `installer_manifest.json` from the app dir, and empty subdirs.
+5. Deletes the HKCU Uninstall registry entry.
+6. Spawns a `%TEMP%` copy of itself (stage 2) that deletes the **app dir** and
+   the **data dir** (incl. `uninstall.exe`), then schedules its own removal via
+   `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)`. No `cmd.exe`, no console flash.
+
+If the app folder was already deleted, steps 1-2 no-op and the registry entry +
+data dir are still cleaned. `uninstall.exe --silent` skips the confirmation
+dialog (used by the registry `QuietUninstallString`).
 
 ### Inspect without installing
 

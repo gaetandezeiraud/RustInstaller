@@ -57,9 +57,14 @@ pub fn run(args: &PackArgs) -> Result<()> {
 
     let associations = parse_assocs(&args.assoc, &args.product)?;
 
+    if args.publisher.trim().is_empty() {
+        bail!("--publisher must not be empty");
+    }
+
     let payload = InstallerPayload {
         kind: if is_patch { PayloadKind::Patch } else { PayloadKind::Full },
         product: args.product.clone(),
+        publisher: args.publisher.clone(),
         from_version: args.from_version.clone(),
         to_version: args.to_version.clone(),
         min_installer_version: args.min_installer_version.clone(),

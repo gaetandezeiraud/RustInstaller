@@ -15,33 +15,34 @@ use std::sync::Arc;
 const DETACHED_PROCESS: u32 = 0x00000008;
 
 pub fn run(silent: bool) -> Result<()> {
-    let install_dir = cleanup::current_install_dir()?;
+    // We run from the data dir (%LOCALAPPDATA%\<publisher>\Uninstall\<product>),
+    // NOT the application dir. The real app dir comes from installer_info.json.
+    let data_dir = cleanup::self_dir()?;
 
-    // Uninstall log lives in %TEMP% so it survives the rmdir of install_dir.
+    // Uninstall log lives in %TEMP% so it survives the rmdir of both dirs.
     common::log::init(common::log::log_path_for_stage2(std::process::id()));
 
-    // If the install state is gone (user manually deleted files but left
-    // uninstall.exe behind), there's nothing to clean by manifest - just
-    // remove the leftover uninstaller + dir quietly. No scary error dialog.
-    let info = match cleanup::read_info(&install_dir) {
+    // If the metadata is gone, just remove leftovers quietly (no error dialog).
+    let info = match cleanup::read_info(&data_dir) {
         Ok(i) => i,
         Err(e) => {
             common::log::warn(format!(
                 "installer_info.json unreadable ({e:#}) - best-effort cleanup of leftovers"
             ));
-            let product = install_dir
+            let product = data_dir
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            spawn_stage2(&install_dir, &product)?;
+            spawn_stage2(Path::new(""), &data_dir, &product)?;
             return Ok(());
         }
     };
 
-    // Manifest may be missing even when info is present (partial delete). Fall
-    // back to an empty manifest: file removal no-ops, but shortcuts/registry/
-    // dir cleanup still run.
-    let manifest = cleanup::read_manifest(&install_dir).unwrap_or_else(|e| {
+    let app_dir = std::path::PathBuf::from(&info.install_dir);
+
+    // Manifest may be missing (partial delete). Fall back to empty: file
+    // removal no-ops, but shortcuts/registry/dir cleanup still run.
+    let manifest = cleanup::read_manifest(&data_dir).unwrap_or_else(|e| {
         common::log::warn(format!("manifest unreadable ({e:#}) - skipping file list"));
         common::models::Manifest {
             version: info.version.clone(),
@@ -54,21 +55,22 @@ pub fn run(silent: bool) -> Result<()> {
     });
 
     common::log::info(format!(
-        "stage1 start: product={} version={} install_dir={} silent={}",
+        "stage1 start: product={} version={} app_dir={} data_dir={} silent={}",
         info.product,
         info.version,
-        install_dir.display(),
+        app_dir.display(),
+        data_dir.display(),
         silent
     ));
 
     if silent {
-        return run_silent(&install_dir, &info, &manifest);
+        return run_silent(&app_dir, &data_dir, &info, &manifest);
     }
 
-    let total_steps =
-        manifest.files.len() as u64 + 3 /* shortcuts + state + registry */;
+    let total_steps = manifest.files.len() as u64 + 3 /* shortcuts + state + registry */;
 
-    let install_dir_owned = install_dir.clone();
+    let app_dir_owned = app_dir.clone();
+    let data_dir_owned = data_dir.clone();
     let info_owned = info.clone();
     let manifest_owned = manifest.clone();
     let tr = ui::tr();
@@ -88,9 +90,9 @@ pub fn run(silent: bool) -> Result<()> {
             let counter = StepCounter::new(total_steps, progress);
             let tr = ui::tr();
 
-            // 1. Payload files
+            // 1. Payload files (in the app dir)
             for rel in manifest_owned.files.keys() {
-                let p = install_dir_owned.join(rel);
+                let p = app_dir_owned.join(rel);
                 let _ = fs::remove_file(&p);
                 counter.step(&tr.fmt("uninstall.removing", &[("file", rel)]));
             }
@@ -100,24 +102,20 @@ pub fn run(silent: bool) -> Result<()> {
             common::assoc::unregister(&info_owned.product, &info_owned.associations);
             counter.step(&tr.get("uninstall.removing_shortcuts"));
 
-            // 3. State files (manifest, version.json - installer_info.json
-            //    kept until just before spawn so stage 2 can still locate things).
-            for extra in ["version.json", "installer_manifest.json"] {
-                let _ = fs::remove_file(install_dir_owned.join(extra));
-            }
+            // 3. App-dir state files (version.json, installer_manifest.json)
+            cleanup::remove_app_state_files(&app_dir_owned);
             counter.step(&tr.get("uninstall.removing_state"));
 
-            // 4. Empty subdirectories
-            cleanup::remove_empty_subdirs(&install_dir_owned);
+            // 4. Empty subdirectories in the app dir
+            cleanup::remove_empty_subdirs(&app_dir_owned);
             counter.report(&tr.get("uninstall.finalizing"));
 
-            // 5. Registry - last so the entry stays visible in Add/Remove Programs
-            //    until we know cleanup actually ran.
+            // 5. Registry - last so the entry stays visible until cleanup ran.
             cleanup::unregister(&info_owned.registry_key);
 
-            // 6. Spawn Stage 2 (separate temp copy) to finish the job.
-            common::log::info("spawning stage 2 to delete install_dir + self");
-            if let Err(e) = spawn_stage2(&install_dir_owned, &info_owned.product) {
+            // 6. Stage 2 deletes the app dir + the data dir (incl. us) + self.
+            common::log::info("spawning stage 2 to delete app dir + data dir + self");
+            if let Err(e) = spawn_stage2(&app_dir_owned, &data_dir_owned, &info_owned.product) {
                 common::log::error(format!("stage2 spawn failed: {e:#}"));
                 ui::fatal(&tr.fmt("uninstall.spawn_failed", &[("err", &format!("{e:#}"))]));
             }
@@ -130,24 +128,27 @@ pub fn run(silent: bool) -> Result<()> {
 }
 
 fn run_silent(
-    install_dir: &Path,
+    app_dir: &Path,
+    data_dir: &Path,
     info: &common::models::InstallInfo,
     manifest: &common::models::Manifest,
 ) -> Result<()> {
-    let n = cleanup::remove_payload_files(install_dir, manifest);
+    let n = cleanup::remove_payload_files(app_dir, manifest);
     common::log::info(format!("removed {} payload files", n));
     cleanup::remove_shortcuts(&info.product);
     common::assoc::unregister(&info.product, &info.associations);
     common::log::info("removed shortcuts + associations");
-    let s = cleanup::remove_state_files(install_dir);
-    common::log::info(format!("removed {} state files", s));
-    cleanup::remove_empty_subdirs(install_dir);
+    let s = cleanup::remove_app_state_files(app_dir);
+    common::log::info(format!("removed {} app state files", s));
+    cleanup::remove_empty_subdirs(app_dir);
     cleanup::unregister(&info.registry_key);
-    common::log::info(format!("unregistered HKCU\\...\\Uninstall\\{}", info.registry_key));
-    spawn_stage2(install_dir, &info.product)
+    common::log::info(format!("unregistered HKCU Uninstall\\{}", info.registry_key));
+    spawn_stage2(app_dir, data_dir, &info.product)
 }
 
-fn spawn_stage2(install_dir: &Path, product: &str) -> Result<()> {
+/// Spawn the temp-copy stage 2 that deletes the app dir + data dir + itself.
+/// `app_dir` may be empty (best-effort path when metadata was unreadable).
+fn spawn_stage2(app_dir: &Path, data_dir: &Path, product: &str) -> Result<()> {
     let self_exe = std::env::current_exe()?;
     let dest = staged_temp_path()?;
     fs::copy(&self_exe, &dest)
@@ -155,7 +156,8 @@ fn spawn_stage2(install_dir: &Path, product: &str) -> Result<()> {
 
     Command::new(&dest)
         .arg("--stage2")
-        .arg(install_dir)
+        .arg(app_dir)
+        .arg(data_dir)
         .arg(product)
         .arg(std::process::id().to_string())
         .creation_flags(DETACHED_PROCESS)
