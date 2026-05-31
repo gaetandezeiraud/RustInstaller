@@ -171,6 +171,17 @@ classic Add/Remove Programs). Removing it from there launches
 
 Verifies the embedded payload and prints kind / versions / payload size.
 
+### Verify an installed copy
+
+```pwsh
+.\setup-myapp-1.0.exe --verify-install "C:\path\to\install"
+```
+
+Re-hashes every file in the installed `installer_manifest.json` and reports
+`OK` / `MISSING` / `CORRUPT` per file. Exit code `0` if clean, `1` if anything
+is missing or corrupted — handy for support / scripted health checks after a
+suspected disk problem.
+
 ## Runtime behavior
 
 For every file in the manifest:
@@ -324,9 +335,14 @@ Then, per file: the current version is moved to `.installer_tmp/backup/`, and
 the staged file is moved into place. Each move retries for ~5 s to ride out
 transient locks (AV scanner, Explorer, search indexer).
 
-**Rollback.** If any commit step fails, every already-committed file is
-restored from its backup (and brand-new files removed), returning the install
-to its exact pre-install state, then the error is reported.
+**Verify.** Every staged file is BLAKE3-checked *before* commit. After commit —
+still inside the transaction, backups intact — each committed file is re-read
+from its final location and re-hashed, catching any corruption introduced by
+the write/rename itself (bad sector, FS glitch). A mismatch triggers rollback.
+
+**Rollback.** If any commit or verify step fails, every already-committed file
+is restored from its backup (and brand-new files removed), returning the
+install to its exact pre-install state, then the error is reported.
 
 **Power-loss recovery.** On the next launch, if a `commit.journal` is found,
 the previous run was interrupted mid-commit — the installer rolls back to the
@@ -340,6 +356,18 @@ crash between "files committed" and "state written" self-heals on re-run
 
 This closes the classic installer failure modes: half-written installs, no-undo
 patch failures, power loss, and locked/anti-virus-held files.
+
+**Additional hardening:**
+- **Cancel** is only accepted during staging (live install untouched), so it
+  can never leave a partial state.
+- **Disk full** mid-stage is detected (`ErrorKind::StorageFull` / Win32 112/39)
+  and reported as "free up space and try again" rather than a raw IO error.
+- **Path traversal**: every manifest path is validated (`safe_rel`) — only
+  plain relative components, no `..`, absolute roots, or drive letters. The
+  payload is Ed25519-signed already; this is defense-in-depth against a
+  compromised key or builder bug.
+- **Long paths**: all file operations use the `\\?\` extended-length prefix, so
+  deeply nested installs (> 260 chars) work.
 
 ## Disk space pre-check
 

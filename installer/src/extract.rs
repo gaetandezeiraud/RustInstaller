@@ -3,13 +3,85 @@ use common::models::{InstallerPayload, Manifest, PayloadKind};
 use hdiffpatch_rs::patchers::HDiff;
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use zip::ZipArchive;
 
 const PATCHES_PREFIX: &str = "patches/";
 const FULL_PREFIX: &str = "full/";
+
+/// Reject manifest paths that could escape the install directory.
+/// The payload is Ed25519-signed, but this is cheap defense-in-depth against a
+/// compromised signing key or a builder bug: only plain, relative,
+/// forward-only components are allowed.
+fn safe_rel(rel: &str) -> Result<()> {
+    if rel.is_empty() {
+        bail!("empty path in manifest");
+    }
+    // No drive letter / UNC / absolute root.
+    let p = Path::new(rel);
+    if p.is_absolute() || rel.contains(':') {
+        bail!("unsafe absolute path in manifest: {}", rel);
+    }
+    for c in p.components() {
+        match c {
+            Component::Normal(_) => {}
+            // `..`, `/`, `C:`, `\\?\` etc. are all rejected.
+            _ => bail!("unsafe path component in manifest: {}", rel),
+        }
+    }
+    Ok(())
+}
+
+/// Make a path long-path-safe on Windows by prefixing `\\?\` (lifts the
+/// 260-char `MAX_PATH` limit). Requires an absolute, backslash-only path with
+/// no relative components, so we normalize first. No-op if already prefixed or
+/// if anything can't be resolved (falls back to the original path).
+#[cfg(windows)]
+fn long_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        return p.to_path_buf();
+    }
+    // Resolve to absolute.
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => return p.to_path_buf(),
+        }
+    };
+    let norm = abs.to_string_lossy().replace('/', "\\");
+    if norm.starts_with(r"\\") {
+        // UNC path: \\server\share -> \\?\UNC\server\share
+        PathBuf::from(format!(r"\\?\UNC\{}", norm.trim_start_matches('\\')))
+    } else {
+        PathBuf::from(format!(r"\\?\{}", norm))
+    }
+}
+
+#[cfg(not(windows))]
+fn long_path(p: &Path) -> PathBuf {
+    p.to_path_buf()
+}
+
+/// Turn an IO error into a user-friendly message, calling out a full disk.
+fn io_msg(action: &str, path: &Path, e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    // ERROR_DISK_FULL = 112, ERROR_HANDLE_DISK_FULL = 39.
+    let raw = e.raw_os_error().unwrap_or(0);
+    if e.kind() == ErrorKind::StorageFull || raw == 112 || raw == 39 {
+        format!(
+            "The disk became full while {} {}. Free up space and try again.",
+            action,
+            path.display()
+        )
+    } else {
+        format!("Failed {} {}: {}", action, path.display(), e)
+    }
+}
 
 pub struct InstallCtx<'a> {
     pub install_dir: PathBuf,
@@ -119,7 +191,11 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
             bail!("cancelled by user");
         }
 
-        let dest = ctx.install_dir.join(rel);
+        safe_rel(rel).inspect_err(|e| {
+            common::log::error(format!("rejected path: {e:#}"));
+        })?;
+
+        let dest = long_path(&ctx.install_dir.join(rel));
         (ctx.on_progress)(done.load(Ordering::Relaxed), total_bytes, rel);
 
         // Hash-skip if already correct.
@@ -152,12 +228,17 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
     // ---- PHASE 2: COMMIT ----------------------------------------------
     // Everything is staged + verified. Now swap files into place. A journal
     // records every path we touch so an interruption can be rolled back.
-    let deleted: Vec<String> = manifest
-        .deleted_files
-        .iter()
-        .filter(|rel| ctx.install_dir.join(rel).exists())
-        .cloned()
-        .collect();
+    let mut deleted: Vec<String> = Vec::new();
+    for rel in &manifest.deleted_files {
+        // Same path-safety gate as install files.
+        if safe_rel(rel).is_err() {
+            common::log::warn(format!("skipping unsafe deleted_files entry: {}", rel));
+            continue;
+        }
+        if long_path(&ctx.install_dir.join(rel)).exists() {
+            deleted.push(rel.clone());
+        }
+    }
 
     if to_commit.is_empty() && deleted.is_empty() {
         common::log::info("nothing to commit (already up to date)");
@@ -187,8 +268,22 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
             return Err(e).context("install failed and was rolled back");
         }
 
-        // Commit done — drop the journal so recovery won't fire, then persist
-        // state and clean up. (A crash past this point self-heals on re-run.)
+        // Post-commit verification, still inside the transaction (backups are
+        // intact). Each committed file was already hash-checked while staging;
+        // this re-reads it from its final location to catch any corruption
+        // introduced by the write/rename itself (bad sector, FS glitch). On
+        // mismatch we roll back to the previous version.
+        (ctx.on_progress)(total_bytes, total_bytes, "Verifying…");
+        if let Err(e) = verify_committed(&ctx.install_dir, manifest, &to_commit) {
+            common::log::error(format!("post-install verification failed: {e:#} — rolling back"));
+            rollback(&temp_dir, &ctx.install_dir, &to_commit, &deleted);
+            cleanup(&temp_dir);
+            return Err(e).context("installed files failed verification and were rolled back");
+        }
+        common::log::info(format!("verified {} committed file(s)", to_commit.len()));
+
+        // Commit done + verified — drop the journal so recovery won't fire, then
+        // persist state and clean up. (A crash past this point self-heals on re-run.)
         let _ = fs::remove_file(journal_path(&temp_dir));
     }
 
@@ -255,9 +350,9 @@ fn stage_file(
         bail!("hash mismatch for {} (zip vs manifest)", rel);
     }
     let mut f = File::create(staged_path)
-        .with_context(|| format!("create staged {}", staged_path.display()))?;
+        .map_err(|e| anyhow::anyhow!("{}", io_msg("creating", staged_path, &e)))?;
     f.write_all(&bytes)
-        .with_context(|| format!("write staged {}", staged_path.display()))?;
+        .map_err(|e| anyhow::anyhow!("{}", io_msg("writing", staged_path, &e)))?;
     common::log::info(format!("staged (full): {} ({} bytes)", rel, entry.size));
     Ok(())
 }
@@ -407,10 +502,10 @@ fn move_retry(src: &Path, dest: &Path) -> Result<()> {
 
 /// Back up the existing file (if any) then move the staged file into place.
 fn commit_one(install_dir: &Path, staged_dir: &Path, backup_dir: &Path, rel: &str) -> Result<()> {
-    let dest = install_dir.join(rel);
-    let staged = staged_dir.join(staged_name(rel));
+    let dest = long_path(&install_dir.join(rel));
+    let staged = long_path(&staged_dir.join(staged_name(rel)));
     if dest.exists() {
-        let backup = backup_dir.join(staged_name(rel));
+        let backup = long_path(&backup_dir.join(staged_name(rel)));
         move_retry(&dest, &backup)
             .with_context(|| format!("backup {} before overwrite", rel))?;
     }
@@ -420,9 +515,9 @@ fn commit_one(install_dir: &Path, staged_dir: &Path, backup_dir: &Path, rel: &st
 
 /// Back up then remove an obsolete file (so rollback can restore it).
 fn backup_then_remove(install_dir: &Path, backup_dir: &Path, rel: &str) -> Result<()> {
-    let dest = install_dir.join(rel);
+    let dest = long_path(&install_dir.join(rel));
     if dest.exists() {
-        let backup = backup_dir.join(staged_name(rel));
+        let backup = long_path(&backup_dir.join(staged_name(rel)));
         move_retry(&dest, &backup).with_context(|| format!("backup {} before delete", rel))?;
     }
     Ok(())
@@ -452,8 +547,8 @@ fn write_journal(temp_dir: &Path, adds: &[String], deletes: &[String]) -> Result
 fn rollback(temp_dir: &Path, install_dir: &Path, adds: &[String], deletes: &[String]) {
     let backup_dir = temp_dir.join("backup");
     let restore = |rel: &str| {
-        let dest = install_dir.join(rel);
-        let backup = backup_dir.join(staged_name(rel));
+        let dest = long_path(&install_dir.join(rel));
+        let backup = long_path(&backup_dir.join(staged_name(rel)));
         if backup.exists() {
             if let Err(e) = move_retry(&backup, &dest) {
                 common::log::error(format!("rollback restore failed for {}: {e:#}", rel));
@@ -482,8 +577,12 @@ fn recover_if_interrupted(temp_dir: &Path, install_dir: &Path) {
     common::log::warn("found interrupted commit journal — rolling back");
     let backup_dir = temp_dir.join("backup");
     for rel in content.lines().filter(|l| !l.trim().is_empty()) {
-        let dest = install_dir.join(rel);
-        let backup = backup_dir.join(staged_name(rel));
+        // Ignore anything that wouldn't be a safe relative path.
+        if safe_rel(rel).is_err() {
+            continue;
+        }
+        let dest = long_path(&install_dir.join(rel));
+        let backup = long_path(&backup_dir.join(staged_name(rel)));
         if backup.exists() {
             let _ = move_retry(&backup, &dest);
         } else {
@@ -531,5 +630,92 @@ fn strip_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 
 fn cleanup(temp_dir: &Path) {
     let _ = fs::remove_dir_all(temp_dir);
+}
+
+/// Re-read each just-committed file from its final location and confirm its
+/// BLAKE3 matches the manifest. Used inside the install transaction.
+fn verify_committed(install_dir: &Path, manifest: &Manifest, committed: &[String]) -> Result<()> {
+    for rel in committed {
+        let Some(entry) = manifest.files.get(rel) else {
+            continue;
+        };
+        let path = long_path(&install_dir.join(rel));
+        let got = hash_file(&path)
+            .with_context(|| format!("re-read installed file {}", rel))?;
+        if got != entry.hash {
+            bail!(
+                "{} is corrupt after writing (expected {}, got {})",
+                rel,
+                &entry.hash[..16.min(entry.hash.len())],
+                &got[..16.min(got.len())]
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Diagnostic: re-hash every file in `installer_manifest.json` under
+/// `install_dir` and report missing / corrupted files. Returns `Err` if any
+/// file is missing or its hash doesn't match (exit code 1 for scripts).
+pub fn verify_install(install_dir: &Path) -> Result<()> {
+    let manifest_path = install_dir.join("installer_manifest.json");
+    let data = fs::read_to_string(&manifest_path).with_context(|| {
+        format!(
+            "read {} — is this an installed product directory?",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: Manifest =
+        serde_json::from_str(&data).context("parse installer_manifest.json")?;
+
+    let mut rels: Vec<(&String, &common::models::FileEntry)> = manifest.files.iter().collect();
+    rels.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut missing = 0usize;
+    let mut corrupt = 0usize;
+    let mut ok = 0usize;
+
+    for (rel, entry) in rels {
+        if safe_rel(rel).is_err() {
+            println!("SKIP  {} (unsafe path)", rel);
+            continue;
+        }
+        let path = long_path(&install_dir.join(rel));
+        if !path.exists() {
+            println!("MISSING  {}", rel);
+            missing += 1;
+            continue;
+        }
+        match hash_file(&path) {
+            Ok(h) if h == entry.hash => ok += 1,
+            Ok(_) => {
+                println!("CORRUPT  {}", rel);
+                corrupt += 1;
+            }
+            Err(e) => {
+                println!("UNREADABLE  {} ({})", rel, e);
+                corrupt += 1;
+            }
+        }
+    }
+
+    println!(
+        "verify {}: {} OK, {} missing, {} corrupt (version {})",
+        install_dir.display(),
+        ok,
+        missing,
+        corrupt,
+        manifest.version
+    );
+
+    if missing == 0 && corrupt == 0 {
+        Ok(())
+    } else {
+        bail!(
+            "verification failed: {} missing, {} corrupt — reinstall or repair",
+            missing,
+            corrupt
+        )
+    }
 }
 

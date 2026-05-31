@@ -47,7 +47,19 @@ fn run() -> Result<()> {
             .unwrap_or_else(|| default_install_path(&loaded.payload.product).to_string_lossy().into_owned());
         return run_silent(&loaded, PathBuf::from(path), launch);
     }
+    // Diagnostic: re-hash an installed dir against its local manifest.
+    if let Some(idx) = args.iter().position(|a| a == "--verify-install") {
+        attach_console();
+        let dir = path_arg(&args, idx)
+            .or_else(|| std::env::var("RUSTINSTALLER_PATH").ok())
+            .unwrap_or_else(|| {
+                default_install_path(&loaded.payload.product).to_string_lossy().into_owned()
+            });
+        return extract::verify_install(&PathBuf::from(dir));
+    }
+
     if args.iter().any(|a| a == "--verify") {
+        attach_console();
         let license = match &loaded.payload.license_text {
             Some(t) => format!("custom ({} bytes)", t.len()),
             None => "built-in placeholder".to_string(),
@@ -77,16 +89,22 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn run_silent(
-    loaded: &payload::LoadedPayload,
-    install_dir: PathBuf,
-    launch: bool,
-) -> Result<()> {
+/// Attach to the parent console (if launched from one) so println!/eprintln!
+/// from this GUI-subsystem binary is visible. No-op off Windows.
+fn attach_console() {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
     }
+}
+
+fn run_silent(
+    loaded: &payload::LoadedPayload,
+    install_dir: PathBuf,
+    launch: bool,
+) -> Result<()> {
+    attach_console();
     println!(
         "Silent install: {} {} -> {}",
         loaded.payload.product, loaded.payload.to_version, install_dir.display()
