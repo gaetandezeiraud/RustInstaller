@@ -15,10 +15,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+/// Exit code when a patch is run against the wrong installed version. Distinct
+/// from generic failure (1) so a launcher can tell "wrong version, fetch the
+/// full installer" from a real error.
+const EXIT_VERSION_MISMATCH: i32 = 10;
+
 fn main() {
     if let Err(e) = run() {
+        let code = if e.downcast_ref::<extract::VersionMismatch>().is_some() {
+            EXIT_VERSION_MISMATCH
+        } else {
+            1
+        };
         report_fatal(&format!("{e:#}"));
-        std::process::exit(1);
+        std::process::exit(code);
     }
 }
 

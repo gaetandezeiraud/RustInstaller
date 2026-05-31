@@ -11,6 +11,34 @@ use zip::ZipArchive;
 const PATCHES_PREFIX: &str = "patches/";
 const FULL_PREFIX: &str = "full/";
 
+/// A patch was run against the wrong installed version. The install was NOT
+/// modified - the existing version still works. The user needs the matching
+/// patch or the full installer for the target version.
+#[derive(Debug)]
+pub struct VersionMismatch {
+    pub expected_from: String,
+    pub found: String,
+    pub to_version: String,
+}
+
+impl std::fmt::Display for VersionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let found = if self.found.is_empty() {
+            "no version".to_string()
+        } else {
+            format!("version {}", self.found)
+        };
+        write!(
+            f,
+            "This update applies to version {}, but {} is installed. \
+             Run the full {} installer instead.",
+            self.expected_from, found, self.to_version
+        )
+    }
+}
+
+impl std::error::Error for VersionMismatch {}
+
 /// Reject manifest paths that could escape the install directory.
 /// The payload is Ed25519-signed, but this is cheap defense-in-depth against a
 /// compromised signing key or a builder bug: only plain, relative,
@@ -126,11 +154,14 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
                 "patch refused: expected from_version={} found={}",
                 expected_from, current_ref
             ));
-            bail!(
-                "patch expects installed version {} but found {}",
-                expected_from,
-                if current_ref.is_empty() { "(none)" } else { current_ref }
-            );
+            // Pre-flight refusal: nothing has been touched, the existing
+            // install is untouched and still works. Typed error so the caller
+            // can return a distinct exit code and a clear message.
+            return Err(anyhow::Error::new(VersionMismatch {
+                expected_from: expected_from.to_string(),
+                found: current_ref.to_string(),
+                to_version: ctx.payload.to_version.clone(),
+            }));
         }
     }
 

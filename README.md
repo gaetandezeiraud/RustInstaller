@@ -149,8 +149,18 @@ default install dir. Implementation: [installer/src/ui_minimal.rs](installer/src
 `--launch` runs the installed `manifest.exe` after install (interactive UI
 exposes this as the "Run program now" checkbox on the Done page).
 
-Progress is printed to stderr, exit code is `0` on success, `1` on any failure
-(bad signature, wrong from-version, anti-rollback, hash mismatch, etc.).
+Progress is printed to stderr. Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `10` | wrong installed version for this patch (install untouched - run the full installer) |
+| `1` | any other failure (bad signature, anti-rollback, hash mismatch, disk, etc.) |
+
+A patch run against the wrong version is a **pre-flight refusal**: nothing is
+touched, the existing install keeps working, and the message tells the user to
+run the full installer. A launcher can branch on exit code `10` to fetch the
+full installer automatically.
 
 ### Uninstall
 
