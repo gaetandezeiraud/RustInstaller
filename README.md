@@ -309,24 +309,57 @@ INFO  target app closed by user after 6s
 Console / windowless processes have no window to message — the installer
 simply waits for them to exit (or Cancel). Implementation: [installer/src/proc.rs](installer/src/proc.rs).
 
+## Crash safety (two-phase commit)
+
+Installs and patches are transactional. Nothing in the live install is touched
+until every file is built and hash-verified.
+
+**Phase 1 — Stage.** Each new/changed file is produced under
+`.installer_tmp/staged/` (full extract, or `hdiff(existing, patch)` for
+patches) and verified by BLAKE3. The existing install is untouched, so a
+cancel or crash here leaves the old version fully intact.
+
+**Phase 2 — Commit.** A `commit.journal` lists every path about to change.
+Then, per file: the current version is moved to `.installer_tmp/backup/`, and
+the staged file is moved into place. Each move retries for ~5 s to ride out
+transient locks (AV scanner, Explorer, search indexer).
+
+**Rollback.** If any commit step fails, every already-committed file is
+restored from its backup (and brand-new files removed), returning the install
+to its exact pre-install state, then the error is reported.
+
+**Power-loss recovery.** On the next launch, if a `commit.journal` is found,
+the previous run was interrupted mid-commit — the installer rolls back to the
+pre-install state from the backups before doing anything else.
+
+State files (`version.json`, `installer_manifest.json`) are written
+`.tmp`-then-rename so a crash can't leave corrupt JSON. Commit order ensures a
+crash between "files committed" and "state written" self-heals on re-run
+(everything hash-skips, state is rewritten). Implementation:
+[installer/src/extract.rs](installer/src/extract.rs).
+
+This closes the classic installer failure modes: half-written installs, no-undo
+patch failures, power loss, and locked/anti-virus-held files.
+
 ## Disk space pre-check
 
 Before writing a single byte the installer queries free space on the chosen
-install volume (`fs4::available_space`) and refuses to start if short. The
-estimate depends on the payload kind:
+install volume (`fs4::available_space`) and refuses to start if short.
 
-| Kind | Required estimate |
-|---|---|
-| Full | sum of all file sizes + 100 MB buffer |
-| Patch | total patch size + largest single file + 100 MB buffer |
+Estimate = **total install size + 100 MB buffer**, for both full and patch.
+With the two-phase commit, staging writes the *full* content of every changed
+file into `.installer_tmp/staged/` and they coexist until commit; the commit
+itself is rename-only (same volume) so it costs no extra space. A patch's
+staged output is the reconstructed *full* file, not the small patch blob — so
+patches need the same headroom as a full install (the old "patch = patch size"
+estimate would under-count and is gone). The figure is conservative:
+hash-skipped unchanged files are counted but never actually staged.
 
-The patch estimate is smaller because existing files stay in place; only
-changed files are staged one at a time in `.installer_tmp/`. On failure the
-installer bails with a human-readable message (shown in the UI / printed in
-silent mode) and logs the figures:
+On failure the installer bails with a human-readable message (shown in the UI
+/ printed in silent mode) and logs the figures:
 
 ```
-INFO  disk space: required ~100.3 MB (full), available 156.20 GB on C:\…\install_target
+INFO  disk space: required ~100.3 MB (full, staged worst-case), available 214.51 GB on C:\…\install_target
 ERROR insufficient disk space: need 2.10 GB but only 512.0 MB free
 ```
 
