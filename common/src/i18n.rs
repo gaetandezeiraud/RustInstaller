@@ -138,3 +138,36 @@ fn os_user_locale() -> Option<String> {
     let s = String::from_utf16_lossy(&buf[..end]);
     Some(s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn for_lang_known_unknown_and_region() {
+        assert_eq!(Translator::for_lang("fr").lang(), "fr");
+        assert_eq!(Translator::for_lang("fr-FR").lang(), "fr");
+        assert_eq!(Translator::for_lang("EN").lang(), "en");
+        assert_eq!(Translator::for_lang("de").lang(), "en"); // unknown -> default
+    }
+
+    #[test]
+    fn get_falls_back_en_then_key() {
+        let fr = Translator::for_lang("fr");
+        assert!(!fr.get("install.install").is_empty()); // present in fr
+        assert_eq!(fr.get("totally.absent.key"), "totally.absent.key");
+    }
+
+    #[test]
+    fn fmt_substitutes_placeholders() {
+        let en = Translator::for_lang("en");
+        let s = en.fmt("install.window_title", &[("product", "Foo"), ("version", "1.0")]);
+        assert!(s.contains("Foo") && s.contains("1.0"));
+    }
+
+    #[test]
+    fn detect_arg_overrides_everything() {
+        let args = vec!["--lang".to_string(), "fr".to_string()];
+        assert_eq!(Translator::detect(&args).lang(), "fr");
+    }
+}

@@ -15,6 +15,9 @@ walkdir = "2.5"
 dirs = "5"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
     "Win32_Foundation",

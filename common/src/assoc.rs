@@ -191,3 +191,22 @@ fn notify_assoc_changed() {
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progid_sanitizes_product_and_dot() {
+        assert_eq!(progid_for("My App", ".myx"), "MyApp.myx");
+        assert_eq!(progid_for("Acme-1", "myz"), "Acme-1.myz");
+        assert_eq!(progid_for("a/b:c", ".dat"), "abc.dat");
+    }
+
+    #[test]
+    fn normalize_ext_dot_and_case() {
+        assert_eq!(normalize_ext("MYX"), ".myx");
+        assert_eq!(normalize_ext(".TxT"), ".txt");
+        assert_eq!(normalize_ext("  .Dat "), ".dat");
+    }
+}

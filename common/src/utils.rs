@@ -76,3 +76,44 @@ pub fn generate_patch(old_file: &Path, new_file: &Path, out_file: &Path) -> Resu
 
     Ok(status.success())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blake3_is_consistent() {
+        assert_eq!(bytes_blake3(b"abc"), bytes_blake3(b"abc"));
+        assert_ne!(bytes_blake3(b"abc"), bytes_blake3(b"abd"));
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f");
+        fs::write(&p, b"abc").unwrap();
+        assert_eq!(file_blake3(&p).unwrap(), bytes_blake3(b"abc"));
+    }
+
+    #[test]
+    fn write_atomic_overwrites_no_tmp_leftover() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("state.json");
+        write_atomic(&p, b"one").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"one");
+        write_atomic(&p, b"two").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"two");
+        let tmp_left = fs::read_dir(d.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().map_or(false, |x| x == "tmp"));
+        assert!(!tmp_left, "no .tmp should remain");
+    }
+
+    #[test]
+    fn collect_files_relative_and_normalized() {
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir_all(d.path().join("a").join("b")).unwrap();
+        fs::write(d.path().join("a").join("b").join("c.txt"), b"x").unwrap();
+        fs::write(d.path().join("root.txt"), b"y").unwrap();
+        let mut got = collect_files(d.path()).unwrap();
+        got.sort();
+        assert_eq!(got, vec!["a/b/c.txt".to_string(), "root.txt".to_string()]);
+    }
+}

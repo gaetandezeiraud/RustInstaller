@@ -872,3 +872,67 @@ pub fn verify_install(data_dir: &Path) -> Result<()> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_rel_accepts_and_rejects() {
+        assert!(safe_rel("bin/app.exe").is_ok());
+        assert!(safe_rel("a/b/c.txt").is_ok());
+        assert!(safe_rel("").is_err());
+        assert!(safe_rel("../x").is_err());
+        assert!(safe_rel("a/../b").is_err());
+        assert!(safe_rel("/abs").is_err());
+        assert!(safe_rel("C:/x").is_err());
+    }
+
+    #[test]
+    fn human_bytes_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert!(human_bytes(1024 * 1024).ends_with("MB"));
+        assert!(human_bytes(2 * 1024 * 1024 * 1024).ends_with("GB"));
+    }
+
+    #[test]
+    fn io_msg_flags_disk_full() {
+        let full = std::io::Error::from_raw_os_error(112);
+        assert!(io_msg("writing", Path::new("x"), &full).contains("disk"));
+        let other = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        assert!(io_msg("writing", Path::new("x"), &other).contains("Failed"));
+    }
+
+    #[test]
+    fn staged_name_is_stable_and_distinct() {
+        assert_eq!(staged_name("a/b.txt"), staged_name("a/b.txt"));
+        assert_ne!(staged_name("a"), staged_name("b"));
+    }
+
+    // Power-loss recovery: a commit interrupted with a journal present must
+    // roll back to the pre-install state on the next launch.
+    #[cfg(windows)]
+    #[test]
+    fn recover_rolls_back_from_journal() {
+        let base = tempfile::tempdir().unwrap();
+        let app = base.path().join("app");
+        let temp = app.join(".installer_tmp");
+        let backup = temp.join("backup");
+        fs::create_dir_all(&backup).unwrap();
+
+        // foo.txt: an existing file that was overwritten -> backup holds the old.
+        fs::write(app.join("foo.txt"), b"NEW").unwrap();
+        fs::write(backup.join(staged_name("foo.txt")), b"OLD").unwrap();
+        // bar.txt: a brand-new file (no backup) -> must be removed.
+        fs::write(app.join("bar.txt"), b"NEWBAR").unwrap();
+
+        fs::write(journal_path(&temp), "foo.txt\nbar.txt\n").unwrap();
+
+        recover_if_interrupted(&temp, &app);
+
+        assert_eq!(fs::read(app.join("foo.txt")).unwrap(), b"OLD"); // restored
+        assert!(!app.join("bar.txt").exists()); // new file removed
+        assert!(!temp.exists()); // temp cleaned
+    }
+}
+

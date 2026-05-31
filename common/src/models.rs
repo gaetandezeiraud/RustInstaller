@@ -105,3 +105,66 @@ pub struct InstallInfo {
     #[serde(default)]
     pub associations: Vec<FileAssoc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_parses_old_json_with_defaults() {
+        // JSON predating publisher / force_reinstall / associations / license.
+        let j = r#"{
+            "kind":"Full","product":"P","from_version":null,"to_version":"1.0",
+            "min_installer_version":"1.0.0","payload_blake3":"deadbeef",
+            "created_at_unix":0,"manifest":{"version":"1.0","files":{}}
+        }"#;
+        let p: InstallerPayload = serde_json::from_str(j).unwrap();
+        assert_eq!(p.publisher, "");
+        assert!(!p.force_reinstall);
+        assert!(p.associations.is_empty());
+        assert!(p.license_text.is_none());
+        assert_eq!(p.kind, PayloadKind::Full);
+    }
+
+    #[test]
+    fn info_parses_old_json_with_defaults() {
+        let j = r#"{
+            "product":"P","version":"1.0","install_dir":"d",
+            "installed_at_unix":0,"registry_key":"P","exe":"a.exe"
+        }"#;
+        let i: InstallInfo = serde_json::from_str(j).unwrap();
+        assert_eq!(i.publisher, "");
+        assert!(i.associations.is_empty());
+    }
+
+    #[test]
+    fn payload_roundtrips() {
+        let p = InstallerPayload {
+            kind: PayloadKind::Patch,
+            product: "P".into(),
+            publisher: "Pub".into(),
+            from_version: Some("1.0".into()),
+            to_version: "1.1".into(),
+            min_installer_version: "1.0.0".into(),
+            payload_blake3: "abc".into(),
+            created_at_unix: 123,
+            manifest: Manifest {
+                version: "1.1".into(),
+                exe: "a.exe".into(),
+                files: Default::default(),
+                deleted_files: vec![],
+                full_size: 0,
+                total_patch_size: 0,
+            },
+            license_text: None,
+            associations: vec![FileAssoc { ext: ".x".into(), description: "X".into() }],
+            force_reinstall: true,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let back: InstallerPayload = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.publisher, "Pub");
+        assert!(back.force_reinstall);
+        assert_eq!(back.associations.len(), 1);
+        assert_eq!(back.from_version.as_deref(), Some("1.0"));
+    }
+}

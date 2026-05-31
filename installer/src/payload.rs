@@ -204,3 +204,36 @@ fn read_resource(id: u16) -> Result<Vec<u8>> {
         Ok(slice.to_vec())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semver_ordering() {
+        assert_eq!(compare_semver("1.0.0", "1.0.0"), 0);
+        assert_eq!(compare_semver("1.0", "1.0.0"), 0); // missing parts = 0
+        assert!(compare_semver("1.2.0", "1.10.0") < 0); // numeric, not lexical
+        assert!(compare_semver("2.0", "1.9") > 0);
+        assert!(compare_semver("1.0.1", "1.0.0") > 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pe_overlay_offset_minimal() {
+        // Minimal PE: MZ, e_lfanew=0x40, "PE\0\0", 1 section, opt header size 0.
+        let mut d = vec![0u8; 0x150];
+        d[0] = b'M';
+        d[1] = b'Z';
+        d[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes()); // e_lfanew
+        d[0x40..0x44].copy_from_slice(b"PE\0\0");
+        let coff = 0x44;
+        d[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes()); // NumberOfSections
+        d[coff + 16..coff + 18].copy_from_slice(&0u16.to_le_bytes()); // SizeOfOptionalHeader
+        let sect = coff + 20; // 0x58
+        d[sect + 16..sect + 20].copy_from_slice(&0x50u32.to_le_bytes()); // SizeOfRawData
+        d[sect + 20..sect + 24].copy_from_slice(&0x100u32.to_le_bytes()); // PointerToRawData
+        assert_eq!(pe_overlay_offset(&d).unwrap(), 0x150);
+        assert!(pe_overlay_offset(b"not a pe").is_err());
+    }
+}

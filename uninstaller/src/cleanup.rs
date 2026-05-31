@@ -106,3 +106,55 @@ pub fn unregister(key: &str) {
 
 #[cfg(not(windows))]
 pub fn unregister(_key: &str) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::models::{FileEntry, Manifest};
+
+    #[test]
+    fn remove_empty_subdirs_keeps_nonempty_and_root() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        fs::create_dir_all(root.join("empty1").join("empty2")).unwrap();
+        fs::create_dir_all(root.join("keep")).unwrap();
+        fs::write(root.join("keep").join("f.txt"), b"x").unwrap();
+
+        remove_empty_subdirs(root);
+
+        assert!(root.exists()); // root left in place
+        assert!(!root.join("empty1").exists()); // empty tree removed
+        assert!(root.join("keep").exists()); // non-empty kept
+        assert!(root.join("keep").join("f.txt").exists());
+    }
+
+    #[test]
+    fn remove_payload_and_state_files() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path();
+        fs::create_dir_all(app.join("bin")).unwrap();
+        fs::write(app.join("bin").join("a.exe"), b"x").unwrap();
+        fs::write(app.join("version.json"), b"{}").unwrap();
+        fs::write(app.join("installer_manifest.json"), b"{}").unwrap();
+
+        let mut files = std::collections::HashMap::new();
+        files.insert(
+            "bin/a.exe".to_string(),
+            FileEntry { hash: "h".into(), size: 1, patch: None },
+        );
+        let m = Manifest {
+            version: "1.0".into(),
+            exe: "bin/a.exe".into(),
+            files,
+            deleted_files: vec![],
+            full_size: 0,
+            total_patch_size: 0,
+        };
+
+        assert_eq!(remove_payload_files(app, &m), 1);
+        assert!(!app.join("bin").join("a.exe").exists());
+        assert_eq!(remove_app_state_files(app), 2);
+        assert!(!app.join("version.json").exists());
+        assert!(!app.join("installer_manifest.json").exists());
+    }
+}

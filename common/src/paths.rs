@@ -39,3 +39,33 @@ pub fn sanitize_component(s: &str) -> String {
         trimmed.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_basic() {
+        assert_eq!(sanitize_component("My Co"), "My Co");
+        assert_eq!(sanitize_component("a/b:c*?<>|\\"), "a_b_c______");
+        assert_eq!(sanitize_component("  trailing. "), "trailing");
+        assert_eq!(sanitize_component(""), "Unknown");
+        assert_eq!(sanitize_component("..."), "Unknown");
+    }
+
+    #[test]
+    fn uninstall_dir_has_expected_suffix() {
+        if let Some(p) = uninstall_dir("Acme Inc", "My App") {
+            let s = p.to_string_lossy().replace('/', "\\");
+            assert!(s.ends_with(r"Acme Inc\Uninstall\My App"), "got {s}");
+        }
+    }
+
+    #[test]
+    fn uninstall_dir_sanitizes_illegal() {
+        if let Some(p) = uninstall_dir("Ac/me", "My:App") {
+            let s = p.to_string_lossy().replace('/', "\\");
+            assert!(s.ends_with(r"Ac_me\Uninstall\My_App"), "got {s}");
+        }
+    }
+}

@@ -247,9 +247,30 @@ fn load_pub_key_hex(path: &Path) -> Result<String> {
     Ok(hex_data)
 }
 
+/// Reject two paths differing only by case: Windows / NTFS is case-insensitive,
+/// so they'd map to the same on-disk file and clobber. (Matters for cross-OS
+/// builds where both can exist in the source tree.)
+fn check_case_collisions(files: &[String]) -> Result<()> {
+    let mut seen: HashMap<String, String> = HashMap::new();
+    for f in files {
+        let lower = f.to_lowercase();
+        if let Some(prev) = seen.get(&lower) {
+            bail!(
+                "case-only filename collision: '{}' and '{}' resolve to the same \
+                 file on Windows. Rename one before packing.",
+                prev,
+                f
+            );
+        }
+        seen.insert(lower, f.clone());
+    }
+    Ok(())
+}
+
 fn build_full(input: &Path, exe: &str, version: &str) -> Result<(Vec<u8>, Manifest)> {
     println!("Scanning {}", input.display());
     let files = collect_files(input)?;
+    check_case_collisions(&files)?;
     println!("Found {} files", files.len());
 
     let total_size = Mutex::new(0u64);
@@ -307,6 +328,7 @@ fn build_patch(
 
     println!("Scanning new {}", new_input.display());
     let new_files = collect_files(new_input)?;
+    check_case_collisions(&new_files)?;
     println!("Scanning old {}", old_input.display());
     let old_files = collect_files(old_input)?;
 
@@ -572,5 +594,45 @@ fn trimmed_title(s: &str) -> String {
         format!("{}...", line.chars().take(60).collect::<String>())
     } else {
         line.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_assocs_valid_and_colon_in_desc() {
+        let v = parse_assocs(
+            &[".myx:My Doc".to_string(), ".a:b:c".to_string()],
+            "Prod",
+        )
+        .unwrap();
+        assert_eq!(v[0].ext, ".myx");
+        assert_eq!(v[0].description, "My Doc");
+        // split_once on the first ':' -> description keeps the rest.
+        assert_eq!(v[1].ext, ".a");
+        assert_eq!(v[1].description, "b:c");
+    }
+
+    #[test]
+    fn parse_assocs_rejects_bad() {
+        assert!(parse_assocs(&["noColon".to_string()], "P").is_err());
+        assert!(parse_assocs(&[":nodesc".to_string()], "P").is_err()); // empty ext
+    }
+
+    #[test]
+    fn case_collision_detection() {
+        assert!(check_case_collisions(&["A.txt".to_string(), "b.txt".to_string()]).is_ok());
+        assert!(check_case_collisions(&["dir/A.txt".to_string(), "dir/a.txt".to_string()]).is_err());
+        assert!(check_case_collisions(&["Foo".to_string(), "foo".to_string()]).is_err());
+    }
+
+    #[test]
+    fn trimmed_title_first_line_truncated() {
+        assert_eq!(trimmed_title("\n\nHello\nworld"), "Hello");
+        let long = "x".repeat(80);
+        let t = trimmed_title(&long);
+        assert!(t.ends_with("...") && t.chars().count() == 63);
     }
 }

@@ -173,3 +173,36 @@ pub fn embed(target: &Path, product: &str, publisher: &str, version: &str) -> Re
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_quad_variants() {
+        assert_eq!(parse_quad("1.2.3.4"), (1, 2, 3, 4));
+        assert_eq!(parse_quad("1.0"), (1, 0, 0, 0));
+        assert_eq!(parse_quad("2.5.1"), (2, 5, 1, 0));
+        assert_eq!(parse_quad("not-a-version"), (0, 0, 0, 0));
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn build_has_fixed_info_signature_and_strings() {
+        let b = build("Prod", "Pub", "1.2.3", "setup.exe");
+        // VS_FIXEDFILEINFO signature 0xFEEF04BD, little-endian.
+        assert!(contains(&b, &0xFEEF04BDu32.to_le_bytes()), "missing FIXEDFILEINFO sig");
+        // UTF-16 strings present.
+        let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
+        assert!(contains(&b, &utf16("Prod")), "ProductName");
+        assert!(contains(&b, &utf16("Pub")), "CompanyName");
+        assert!(contains(&b, &utf16("1.2.3")), "version");
+        assert!(contains(&b, &utf16("setup.exe")), "OriginalFilename");
+        // Root wLength (first u16) equals total blob length.
+        let root_len = u16::from_le_bytes([b[0], b[1]]) as usize;
+        assert_eq!(root_len, b.len());
+    }
+}
