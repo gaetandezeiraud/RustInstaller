@@ -1450,6 +1450,7 @@ dependencies = [
  "memchr",
  "thiserror 2.0.18",
  "zopfli",
+ "zstd",
 ]
 
 [[package]]

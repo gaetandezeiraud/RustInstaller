@@ -458,40 +458,104 @@ fn build_patch(
     Ok((zip_bytes, manifest))
 }
 
+/// Extensions whose contents are already compressed. Re-running zstd over them
+/// wastes build CPU for ~0% size gain AND forces a pointless decompress at
+/// install time. They're stored verbatim (`CompressionMethod::Stored`) instead.
+const ALREADY_COMPRESSED: &[&str] = &[
+    // Entropy-coded media only - zstd reliably gains ~0% here. Deliberately NOT
+    // listing archive containers (.zip/.gz/.7z/...): they can wrap weakly- or
+    // un-compressed data that zstd-19 still shrinks a lot (measured: a 520 MB
+    // .zip lost ~94 MB under zstd), so we let zstd try those.
+    "png", "jpg", "jpeg", "gif", "webp", "avif", "heic",
+    "mp3", "aac", "ogg", "opus", "flac", "mp4", "m4v", "mov", "avi", "mkv", "webm",
+    "woff2", // brotli-compressed internally
+];
+
+/// Pick the compression method for one entry by extension: `Stored` for
+/// already-compressed formats, `Zstd` for everything else.
+fn method_for(name: &str) -> zip::CompressionMethod {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some(e) if ALREADY_COMPRESSED.contains(&e) => zip::CompressionMethod::Stored,
+        _ => zip::CompressionMethod::Zstd,
+    }
+}
+
+/// Compress one file into a standalone single-entry zip held in memory. Called
+/// from many rayon workers in parallel - each owns its own `ZipWriter`, so no
+/// shared mutable state. The chosen method (Stored/Zstd) is recorded in the
+/// entry header, so the merge step and the installer read it back transparently.
+fn compress_entry(entry_name: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+    let method = method_for(entry_name);
+    let mut opts = SimpleFileOptions::default()
+        .compression_method(method)
+        // Files can exceed 4 GB individually; flip on Zip64 when needed.
+        .large_file(bytes.len() as u64 >= u32::MAX as u64);
+    if method == zip::CompressionMethod::Zstd {
+        // Level 19: high ratio, decompress speed level-independent. Compress cost
+        // is build-time only. Range -7..=22; 19 sits before the 20+ time cliff.
+        opts = opts.compression_level(Some(19));
+    }
+    let cap = bytes.len() / 2 + 64;
+    let mut zip = ZipWriter::new(Cursor::new(Vec::with_capacity(cap)));
+    zip.start_file(entry_name, opts)?;
+    zip.write_all(bytes)?;
+    Ok(zip.finish()?.into_inner())
+}
+
 /// Build a zip in memory.
 ///
 /// - Files listed in `full_paths` go under `full/<rel>` (read from `input`).
 /// - Files listed in `patch_paths` go under the file path recorded by the builder.
+///
+/// Compression runs in parallel (one rayon worker per file, each producing a
+/// standalone single-entry zip), then the workers' outputs are merged into the
+/// final archive by raw byte copy (`raw_copy_file` - no recompression). This
+/// saturates every core; the old single-threaded `ZipWriter` left 23/24 idle.
 fn write_zip(
     input: &Path,
     full_paths: &[String],
     _unused: &[String],
     patch_paths: &HashMap<String, PathBuf>,
 ) -> Result<Vec<u8>> {
-    let buf = Vec::with_capacity(8 * 1024 * 1024);
-    let cursor = Cursor::new(buf);
-    let mut zip = ZipWriter::new(cursor);
-    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
+    // (entry_name_in_zip, source_path_on_disk) for every file to pack.
+    let mut jobs: Vec<(String, PathBuf)> = Vec::with_capacity(full_paths.len() + patch_paths.len());
     for rel in full_paths {
-        let abs = input.join(rel);
-        let bytes = fs::read(&abs).with_context(|| format!("read {}", abs.display()))?;
-        let zip_path = format!("{}{}", FULL_PREFIX, rel);
-        zip.start_file(&zip_path, opts)?;
-        zip.write_all(&bytes)?;
+        jobs.push((format!("{}{}", FULL_PREFIX, rel), input.join(rel)));
     }
-
     for (rel, patch_path) in patch_paths {
-        let bytes = fs::read(patch_path)
-            .with_context(|| format!("read patch {}", patch_path.display()))?;
         let safe_name = blake3::hash(rel.as_bytes()).to_hex().to_string();
-        let zip_path = format!("{}{}.patch", PATCHES_PREFIX, safe_name);
-        zip.start_file(&zip_path, opts)?;
-        zip.write_all(&bytes)?;
+        jobs.push((
+            format!("{}{}.patch", PATCHES_PREFIX, safe_name),
+            patch_path.clone(),
+        ));
     }
 
-    let cursor = zip.finish()?;
-    Ok(cursor.into_inner())
+    // PHASE 1 (parallel): read + compress each file into its own mini-zip.
+    let minis: Vec<Vec<u8>> = jobs
+        .par_iter()
+        .map(|(name, path)| {
+            let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            compress_entry(name, &bytes)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // PHASE 2 (sequential): merge each mini-zip's single entry into the master
+    // by raw copy - bytes are already compressed, so this is just memcpy +
+    // header rewrite, fast and single-threaded. `into_iter` frees each mini as
+    // it's consumed to keep peak memory down.
+    let mut zip = ZipWriter::new(Cursor::new(Vec::with_capacity(16 * 1024 * 1024)));
+    for mini in minis.into_iter() {
+        let mut src = zip::ZipArchive::new(Cursor::new(mini))
+            .context("reopen worker mini-zip for merge")?;
+        let entry = src.by_index_raw(0).context("read mini-zip entry")?;
+        zip.raw_copy_file(entry).context("merge entry into payload zip")?;
+    }
+
+    Ok(zip.finish()?.into_inner())
 }
 
 /// Build (or reuse) the installer stub with the given public key compiled in.
