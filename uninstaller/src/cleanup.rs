@@ -16,13 +16,69 @@ pub fn self_dir() -> Result<PathBuf> {
         .context("locate uninstaller parent dir")
 }
 
+/// What happened to a file we tried to remove.
+enum Removal {
+    /// Path didn't exist - nothing to do.
+    Absent,
+    /// Removed now.
+    Removed,
+    /// Still locked; queued for deletion on next reboot (elevated runs only).
+    Pending,
+    /// Still locked and could not be queued - an orphan will remain.
+    Stuck,
+}
+
+/// Schedule `path` for deletion on the next reboot. Uses
+/// `MoveFileEx(.., MOVEFILE_DELAY_UNTIL_REBOOT)`, which records the pending
+/// rename under HKLM and therefore only succeeds when the process is elevated;
+/// returns `false` otherwise. Best-effort last resort - the retry in
+/// `remove_file_robust` already clears the common case (a transient AV scan).
+#[cfg(windows)]
+fn schedule_delete_on_reboot(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+    use windows::core::PCWSTR;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        MoveFileExW(PCWSTR(wide.as_ptr()), PCWSTR::null(), MOVEFILE_DELAY_UNTIL_REBOOT).is_ok()
+    }
+}
+
+#[cfg(not(windows))]
+fn schedule_delete_on_reboot(_path: &Path) -> bool {
+    false
+}
+
+/// Remove a file, surviving transient locks (Defender/other AV scanning a file,
+/// the indexer, Explorer) via the shared retry policy. If it's still locked
+/// after the retry budget, fall back to a reboot-time delete so we don't leave
+/// an orphan behind.
+fn remove_file_robust(path: &Path) -> Removal {
+    if !path.exists() {
+        return Removal::Absent;
+    }
+    if common::utils::remove_file_retry(path).is_ok() {
+        return Removal::Removed;
+    }
+    if schedule_delete_on_reboot(path) {
+        Removal::Pending
+    } else {
+        Removal::Stuck
+    }
+}
+
 /// Remove state files written into the application directory by the installer
-/// (`version.json`, `installer_manifest.json`).
+/// (`version.json`, `installer_manifest.json`). Returns the count handled
+/// (removed now or queued for reboot).
 pub fn remove_app_state_files(app_dir: &Path) -> usize {
     let mut count = 0;
     for extra in ["version.json", "installer_manifest.json"] {
         let p = app_dir.join(extra);
-        if p.exists() && fs::remove_file(&p).is_ok() {
+        if matches!(remove_file_robust(&p), Removal::Removed | Removal::Pending) {
             count += 1;
         }
     }
@@ -42,13 +98,19 @@ pub fn read_manifest(install_dir: &Path) -> Result<Manifest> {
     serde_json::from_str(&s).context("parse installer_manifest.json")
 }
 
-/// Remove every payload file from `manifest`. Returns removed count.
+/// Remove every payload file from `manifest`. Returns the count handled
+/// (removed now or queued for reboot). Files that stay stuck (still locked and
+/// not queueable) are logged so they aren't lost silently.
 pub fn remove_payload_files(install_dir: &Path, manifest: &Manifest) -> usize {
     let mut count = 0;
     for rel in manifest.files.keys() {
         let p = install_dir.join(rel);
-        if p.exists() && fs::remove_file(&p).is_ok() {
-            count += 1;
+        match remove_file_robust(&p) {
+            Removal::Removed | Removal::Pending => count += 1,
+            Removal::Stuck => {
+                common::log::warn(format!("could not remove (locked): {}", p.display()));
+            }
+            Removal::Absent => {}
         }
     }
     count
@@ -56,9 +118,7 @@ pub fn remove_payload_files(install_dir: &Path, manifest: &Manifest) -> usize {
 
 pub fn remove_shortcuts(product: &str) {
     for p in common::shortcuts::paths_for(product) {
-        if p.exists() {
-            let _ = fs::remove_file(&p);
-        }
+        let _ = remove_file_robust(&p);
     }
 }
 

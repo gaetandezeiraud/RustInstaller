@@ -24,8 +24,13 @@ pub fn finalize(
     fs::create_dir_all(&data_dir)
         .with_context(|| format!("create uninstall data dir {}", data_dir.display()))?;
 
+    // Atomic + retrying write: writing a fresh `.exe` is the prime Defender
+    // real-time trigger (it locks the new file to scan it the moment it's
+    // created). A bare `fs::write` here would intermittently fail the install
+    // *after* every product file is already in place. `write_atomic` stages a
+    // `.tmp` and retries the rename past the scan lock.
     let uninstaller_path = data_dir.join("uninstall.exe");
-    fs::write(&uninstaller_path, uninstaller_bytes)
+    common::utils::write_atomic(&uninstaller_path, uninstaller_bytes)
         .with_context(|| format!("write {}", uninstaller_path.display()))?;
 
     let key = registry_key_for(&payload.product);
