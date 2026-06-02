@@ -196,7 +196,7 @@ App icon on the left (extracted from the installer's own embedded icon), title
 ~0.9 s after reaching 100 %; on error it stays open with the message. Same
 data-safe pre-flight as every install (closes the running app first, disk
 check, etc.). Path resolves from the argument, `RUSTINSTALLER_PATH`, or the
-default install dir. Implementation: [installer/src/ui_minimal.rs](installer/src/ui_minimal.rs).
+default install dir. Implementation: [installer/src/ui/minimal.rs](installer/src/ui/minimal.rs).
 
 ### Silent (`/S` style, IT-friendly)
 
@@ -270,6 +270,25 @@ Re-hashes every file in the installed `installer_manifest.json` and reports
 `OK` / `MISSING` / `CORRUPT` per file. Exit code `0` if clean, `1` if anything
 is missing or corrupted - handy for support / scripted health checks after a
 suspected disk problem.
+
+### Dev: preview a UI view
+
+**Debug builds only.** Render a single installer view with sample data - no
+payload, no install - to iterate on layout fast:
+
+```pwsh
+cargo build -p installer
+.\target\debug\installer.exe --preview <view>
+```
+
+`<view>` is one of `license`, `choose`, `progress`, `done`, `error`, or
+`minimal`. Append `-patch` (e.g. `--preview choose-patch`) to preview the patch
+variant, which shows the `1.1.0 → 1.2.0` subheader. The window opens straight on
+that view with a sample "Sample App 1.2.0" payload and no worker thread;
+`progress` shows ~62 %, `error` a sample message. `--preview` is compiled out of
+release builds. Implementation:
+[installer/src/ui/win32/mod.rs](installer/src/ui/win32/mod.rs),
+[installer/src/ui/minimal.rs](installer/src/ui/minimal.rs).
 
 ## Runtime behavior
 

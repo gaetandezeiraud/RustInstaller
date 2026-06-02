@@ -96,6 +96,21 @@ pub fn run(
     Ok(())
 }
 
+/// Dev-only: show the minimal window with sample mid-progress, no install worker.
+#[cfg(debug_assertions)]
+pub fn preview(translator: common::i18n::Translator) -> Result<()> {
+    T.with(|t| *t.borrow_mut() = translator);
+    let payload = crate::ui::sample_payload("minimal");
+    unsafe {
+        let win = build_window(&payload)?;
+        let hwnd = HWND(win.hwnd_isize as *mut _);
+        set_progress(hwnd, ID_PROGRESS, scale_progress(62, 100));
+        set_dlg_text(hwnd, ID_STATUS, "62%  bin/app.exe");
+        helpers::pump_messages();
+    }
+    Ok(())
+}
+
 struct Window {
     hwnd_isize: isize,
     cancel: Arc<AtomicBool>,

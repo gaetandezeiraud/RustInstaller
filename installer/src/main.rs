@@ -28,11 +28,23 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let loaded = payload::load_and_verify()?;
-
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let launch = args.iter().any(|a| a == "--launch");
     let translator = common::i18n::Translator::detect(&args);
+
+    // Dev-only: render a single UI view with sample data, no payload needed.
+    // e.g. `installer --preview minimal`, `--preview license`, `--preview progress`.
+    #[cfg(debug_assertions)]
+    if let Some(idx) = args.iter().position(|a| a == "--preview") {
+        let view = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("license");
+        return if view == "minimal" {
+            ui::minimal::preview(translator)
+        } else {
+            ui::win32::preview(view, translator)
+        };
+    }
+
+    let loaded = payload::load_and_verify()?;
+    let launch = args.iter().any(|a| a == "--launch");
 
     // Compact auto-start update UI (app-triggered self-update): no license,
     // path picker or buttons - just icon + progress.

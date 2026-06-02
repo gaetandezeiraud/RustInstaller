@@ -105,6 +105,22 @@ pub fn run(
     T.with(|t| *t.borrow_mut() = translator);
 
     unsafe {
+        let hwnd = create_window(&loaded.payload, &default_path)?;
+        apply_phase(hwnd, Phase::License);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        helpers::pump_messages();
+    }
+    Ok(())
+}
+
+/// Register the class, build the window + all controls, install state. Shared by
+/// the real `run` and the dev-only `preview`. Does not show the window or set a
+/// phase.
+unsafe fn create_window(
+    payload: &common::models::InstallerPayload,
+    default_path: &PathBuf,
+) -> Result<HWND> {
+    unsafe {
         helpers::init_progress_class();
         let hinstance = GetModuleHandleW(PCWSTR::null())?;
         let hicon = helpers::own_icon();
@@ -134,10 +150,7 @@ pub fn run(
 
         let title = helpers::wide(&tr().fmt(
             "install.window_title",
-            &[
-                ("product", &loaded.payload.product),
-                ("version", &loaded.payload.to_version),
-            ],
+            &[("product", &payload.product), ("version", &payload.to_version)],
         ));
 
         let state = Rc::new(RefCell::new(UiState {
@@ -180,8 +193,57 @@ pub fn run(
         }
 
         helpers::center(hwnd);
-        views::build_controls(hwnd, &loaded.payload, &default_path);
-        apply_phase(hwnd, Phase::License);
+        views::build_controls(hwnd, payload, default_path);
+        Ok(hwnd)
+    }
+}
+
+/// Dev-only: show the wizard jumped straight to one view with sample data, no
+/// install worker. `view` is one of `license|choose|progress|done|error`.
+#[cfg(debug_assertions)]
+pub fn preview(view: &str, translator: common::i18n::Translator) -> Result<()> {
+    let payload = crate::ui::sample_payload(view);
+    // Accept a `-patch` suffix (e.g. `choose-patch`) to preview the patch variant.
+    let phase = match view.split('-').next().unwrap_or(view) {
+        "choose" => Phase::Choose,
+        "progress" => Phase::Progress,
+        "done" => Phase::Done,
+        "error" => Phase::Error,
+        _ => Phase::License,
+    };
+    PAYLOAD.with(|p| *p.borrow_mut() = Some(payload.clone()));
+    LAUNCH_FLAG.with(|l| *l.borrow_mut() = true);
+    T.with(|t| *t.borrow_mut() = translator);
+
+    let default_path = PathBuf::from(r"C:\Program Files\Sample App");
+    unsafe {
+        let hwnd = create_window(&payload, &default_path)?;
+        apply_phase(hwnd, phase);
+
+        // Populate the view with believable sample content.
+        match phase {
+            Phase::Progress => {
+                STATE.with(|s| {
+                    if let Some(st) = s.borrow().as_ref() {
+                        if let Ok(mut p) = st.borrow().progress.lock() {
+                            p.done = 7_700_000;
+                            p.total = 12_345_678;
+                            p.name = "bin/app.exe".to_string();
+                        }
+                    }
+                });
+                handlers::update_progress(hwnd);
+            }
+            Phase::Error => {
+                let msg = "Sample error: the disk became full while writing bin/app.exe.";
+                helpers::set_dlg_text(
+                    hwnd,
+                    ID_STATUS,
+                    &format!("{}{}", tr().get("install.err_prefix"), msg),
+                );
+            }
+            _ => {}
+        }
 
         let _ = ShowWindow(hwnd, SW_SHOW);
         helpers::pump_messages();
