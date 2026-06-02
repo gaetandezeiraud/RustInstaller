@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use common::models::{InstallerPayload, Manifest, PayloadKind};
 use hdiffpatch_rs::patchers::HDiff;
+use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -223,60 +224,83 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
     let total_bytes: u64 = manifest.files.values().map(|e| e.size).sum();
     let done = Arc::new(AtomicU64::new(0));
 
-    let mut archive =
-        ZipArchive::new(Cursor::new(ctx.zip_bytes)).context("open embedded zip")?;
+    // Validate the embedded zip up front (clean error if corrupt) before the
+    // parallel workers each open their own view of it.
+    ZipArchive::new(Cursor::new(ctx.zip_bytes)).context("open embedded zip")?;
 
     // Deterministic order - easier UX and reproducible.
     let mut entries: Vec<(&String, &common::models::FileEntry)> =
         manifest.files.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
 
-    // ---- PHASE 1: STAGE ------------------------------------------------
+    // ---- PHASE 1: STAGE (parallel) ------------------------------------
     // Build every new/changed file in `staged/`, verified by hash. The live
     // install is NOT touched here, so cancelling or crashing during staging
     // leaves the existing install fully intact.
-    let mut to_commit: Vec<String> = Vec::new();
-
-    for (rel, entry) in entries {
-        if ctx.cancel.load(Ordering::Relaxed) {
-            common::log::warn("install cancelled by user during staging");
-            cleanup(&temp_dir);
-            bail!("cancelled by user");
-        }
-
-        safe_rel(rel).inspect_err(|e| {
-            common::log::error(format!("rejected path: {e:#}"));
-        })?;
-
-        let dest = long_path(&ctx.install_dir.join(rel));
-        (ctx.on_progress)(done.load(Ordering::Relaxed), total_bytes, rel);
-
-        // Hash-skip if already correct (disabled in force_reinstall: rewrite all).
-        if dest.exists() && !ctx.payload.force_reinstall {
-            if let Ok(h) = hash_file(&dest) {
-                if h == entry.hash {
-                    common::log::info(format!("skip (hash match): {}", rel));
-                    done.fetch_add(entry.size, Ordering::Relaxed);
-                    (ctx.on_progress)(done.load(Ordering::Relaxed), total_bytes, rel);
-                    continue;
+    //
+    // Files are independent (each writes its own `staged_name`), so staging
+    // fans out across cores. Each rayon worker opens its OWN `ZipArchive` view
+    // over the shared (mmap-backed) byte slice; `map_init` builds it once per
+    // worker thread, not once per file, so the central-directory parse is paid
+    // ~once per core rather than per entry.
+    let staged: Vec<Result<Option<String>>> = entries
+        .par_iter()
+        .map_init(
+            || ZipArchive::new(Cursor::new(ctx.zip_bytes)),
+            |archive, &(rel, entry)| -> Result<Option<String>> {
+                if ctx.cancel.load(Ordering::Relaxed) {
+                    bail!("cancelled by user");
                 }
+
+                safe_rel(rel).inspect_err(|e| {
+                    common::log::error(format!("rejected path: {e:#}"));
+                })?;
+
+                let dest = long_path(&ctx.install_dir.join(rel));
+                (ctx.on_progress)(done.load(Ordering::Relaxed), total_bytes, rel);
+
+                // Hash-skip if already correct (disabled in force_reinstall: rewrite all).
+                if dest.exists() && !ctx.payload.force_reinstall {
+                    if let Ok(h) = hash_file(&dest) {
+                        if h == entry.hash {
+                            common::log::info(format!("skip (hash match): {}", rel));
+                            done.fetch_add(entry.size, Ordering::Relaxed);
+                            (ctx.on_progress)(done.load(Ordering::Relaxed), total_bytes, rel);
+                            return Ok(None);
+                        }
+                    }
+                }
+
+                // Per-worker archive view; rebuilt only if the worker's init failed.
+                let archive = archive
+                    .as_mut()
+                    .map_err(|e| anyhow::anyhow!("open embedded zip: {e}"))?;
+                let staged_path = staged_dir.join(staged_name(rel));
+                stage_file(archive, ctx.payload.kind, rel, entry, &dest, &staged_path)?;
+
+                done.fetch_add(entry.size, Ordering::Relaxed);
+                (ctx.on_progress)(done.load(Ordering::Relaxed), total_bytes, rel);
+                Ok(Some(rel.clone()))
+            },
+        )
+        .collect();
+
+    // Surface the first staging error (cancel included). The live install was
+    // never touched during staging, so we just discard the temp area and bail.
+    let mut to_commit: Vec<String> = Vec::new();
+    for r in staged {
+        match r {
+            Ok(Some(rel)) => to_commit.push(rel),
+            Ok(None) => {}
+            Err(e) => {
+                common::log::warn(format!("staging failed/cancelled: {e:#}"));
+                cleanup(&temp_dir);
+                return Err(e);
             }
         }
-
-        let staged_path = staged_dir.join(staged_name(rel));
-        stage_file(
-            &mut archive,
-            ctx.payload.kind,
-            rel,
-            entry,
-            &dest,
-            &staged_path,
-        )?;
-        to_commit.push(rel.clone());
-
-        done.fetch_add(entry.size, Ordering::Relaxed);
-        (ctx.on_progress)(done.load(Ordering::Relaxed), total_bytes, rel);
     }
+    // Parallel completion order is nondeterministic; restore a stable commit order.
+    to_commit.sort();
 
     // ---- PHASE 2: COMMIT ----------------------------------------------
     // Everything is staged + verified. Now swap files into place. A journal
@@ -782,9 +806,11 @@ fn cleanup(temp_dir: &Path) {
 /// Re-read each just-committed file from its final location and confirm its
 /// BLAKE3 matches the manifest. Used inside the install transaction.
 fn verify_committed(install_dir: &Path, manifest: &Manifest, committed: &[String]) -> Result<()> {
-    for rel in committed {
+    // Re-hashing is independent per file - fan out across cores. `try_for_each`
+    // stops and returns the first corruption it finds.
+    committed.par_iter().try_for_each(|rel| -> Result<()> {
         let Some(entry) = manifest.files.get(rel) else {
-            continue;
+            return Ok(());
         };
         let path = long_path(&install_dir.join(rel));
         let got = hash_file(&path)
@@ -797,8 +823,8 @@ fn verify_committed(install_dir: &Path, manifest: &Manifest, committed: &[String
                 &got[..16.min(got.len())]
             );
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Diagnostic: re-hash every installed file and report missing / corrupted

@@ -555,6 +555,7 @@ dependencies = [
  "hex",
  "memmap2",
  "mslnk",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

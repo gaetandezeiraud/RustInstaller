@@ -21,6 +21,7 @@ hdiffpatch-rs = { git = "https://github.com/TwintailTeam/hdiffpatch-rs" }
 mslnk = "0.1"
 fs4 = "0.13"
 memmap2 = "0.9"
+rayon = "1.8"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
