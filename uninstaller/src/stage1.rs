@@ -6,7 +6,6 @@
 use crate::cleanup;
 use crate::ui::{self, StepCounter, UninstallParams};
 use anyhow::{Context, Result};
-use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
@@ -101,10 +100,13 @@ pub fn run(silent: bool) -> Result<()> {
             let counter = StepCounter::new(total_steps, progress);
             let tr = ui::tr();
 
-            // 1. Payload files (in the app dir)
+            // 1. Payload files (in the app dir). Robust removal: retry past a
+            // transient AV/indexer lock, then queue reboot-delete if still held
+            // (matches the silent path; a bare remove here would orphan files a
+            // scanner happened to be touching).
             for rel in manifest_owned.files.keys() {
                 let p = app_dir_owned.join(rel);
-                let _ = fs::remove_file(&p);
+                cleanup::remove_one_payload(&p);
                 counter.step(&tr.fmt("uninstall.removing", &[("file", rel)]));
             }
 
@@ -162,7 +164,9 @@ fn run_silent(
 fn spawn_stage2(app_dir: &Path, data_dir: &Path, product: &str) -> Result<()> {
     let self_exe = std::env::current_exe()?;
     let dest = staged_temp_path()?;
-    fs::copy(&self_exe, &dest)
+    // Retry past a transient AV scan of the freshly copied `.exe`; if this copy
+    // fails outright, stage 2 never runs and the app/data dirs are never deleted.
+    common::utils::copy_retry(&self_exe, &dest)
         .with_context(|| format!("copy stage2 to {}", dest.display()))?;
 
     Command::new(&dest)

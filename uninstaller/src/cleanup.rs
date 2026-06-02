@@ -98,6 +98,15 @@ pub fn read_manifest(install_dir: &Path) -> Result<Manifest> {
     serde_json::from_str(&s).context("parse installer_manifest.json")
 }
 
+/// Robustly remove a single payload file (retry transient locks, then schedule
+/// reboot-delete), logging if it stays stuck. For the interactive uninstall
+/// loop, which removes files one at a time to report per-file progress.
+pub fn remove_one_payload(path: &Path) {
+    if let Removal::Stuck = remove_file_robust(path) {
+        common::log::warn(format!("could not remove (locked): {}", path.display()));
+    }
+}
+
 /// Remove every payload file from `manifest`. Returns the count handled
 /// (removed now or queued for reboot). Files that stay stuck (still locked and
 /// not queueable) are logged so they aren't lost silently.

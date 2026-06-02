@@ -66,6 +66,32 @@ pub fn remove_file_retry(path: &Path) -> Result<()> {
     ))
 }
 
+/// Copy `src` → `dest`, retrying transient locks. Mainly for copying an `.exe`
+/// (the prime AV-scan target) into a scratch location, where a bare `fs::copy`
+/// can lose to the real-time scan of the freshly written file.
+pub fn copy_retry(src: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut last_err = None;
+    for _ in 0..FS_RETRIES {
+        match fs::copy(src, dest) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(FS_RETRY_DELAY);
+            }
+        }
+    }
+    Err(anyhow!(
+        "could not copy {} -> {} after {} attempts: {}",
+        src.display(),
+        dest.display(),
+        FS_RETRIES,
+        last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown".into())
+    ))
+}
+
 /// Write `bytes` to `path`, retrying transient locks (a stale `.tmp` from a
 /// prior run may still be briefly held by a scanner).
 fn write_bytes_retry(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -205,6 +231,17 @@ mod tests {
         fs::write(&src2, b"newer").unwrap();
         rename_retry(&src2, &dest).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"newer");
+    }
+
+    #[test]
+    fn copy_retry_copies_and_creates_parent() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("src.exe");
+        fs::write(&src, b"binary").unwrap();
+        let dest = d.path().join("scratch").join("out.exe"); // parent created
+        copy_retry(&src, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"binary");
+        assert!(src.exists()); // copy, not move
     }
 
     #[test]
