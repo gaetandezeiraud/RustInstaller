@@ -6,10 +6,8 @@ use std::path::Path;
 pub const OVERLAY_MAGIC: &[u8; 8] = b"RIIPLD01";
 
 /// Embed the small resources via the Win32 resource API: signed manifest
-/// (id=2), uninstaller (id=3), and the payload length (id=4). The big payload
-/// zip is NOT a resource - it's appended as a PE overlay by `append_payload`,
-/// which has no size ceiling and lets the installer mmap it instead of loading
-/// gigabytes into RAM.
+/// (id=2), uninstaller (id=3), payload length (id=4). The payload zip itself is
+/// appended as a PE overlay by `append_payload` (no size limit, mmap-able).
 #[cfg(windows)]
 pub fn embed_resources(
     exe: &Path,

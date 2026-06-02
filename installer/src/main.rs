@@ -15,9 +15,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-/// Exit code when a patch is run against the wrong installed version. Distinct
-/// from generic failure (1) so a launcher can tell "wrong version, fetch the
-/// full installer" from a real error.
+/// Exit code for a patch run against the wrong installed version. Distinct from
+/// generic failure (1) so a launcher can tell the two apart.
 const EXIT_VERSION_MISMATCH: i32 = 10;
 
 fn main() {
@@ -39,8 +38,8 @@ fn run() -> Result<()> {
     let launch = args.iter().any(|a| a == "--launch");
     let translator = common::i18n::Translator::detect(&args);
 
-    // Compact auto-start update UI (app-triggered self-update). Skips license,
-    // path picker and buttons - runs immediately, shows icon + progress.
+    // Compact auto-start update UI (app-triggered self-update): no license,
+    // path picker or buttons - just icon + progress.
     if let Some(idx) = args.iter().position(|a| a == "--minimal" || a == "/minimal") {
         let path = path_arg(&args, idx)
             .or_else(|| std::env::var("RUSTINSTALLER_PATH").ok())
@@ -57,8 +56,7 @@ fn run() -> Result<()> {
             .unwrap_or_else(|| default_install_path(&loaded.payload.product).to_string_lossy().into_owned());
         return run_silent(&loaded, PathBuf::from(path), launch);
     }
-    // Diagnostic: re-hash the installed files against the manifest stored in
-    // the per-user data dir (metadata no longer lives in the app folder).
+    // Diagnostic: re-hash installed files against the manifest in the data dir.
     if args.iter().any(|a| a == "--verify-install") {
         attach_console();
         let data_dir = common::paths::uninstall_dir(
@@ -100,8 +98,8 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// Attach to the parent console (if launched from one) so println!/eprintln!
-/// from this GUI-subsystem binary is visible. No-op off Windows.
+/// Attach to the parent console so output from this GUI-subsystem binary is
+/// visible. No-op off Windows.
 fn attach_console() {
     #[cfg(windows)]
     unsafe {
@@ -153,8 +151,7 @@ fn path_arg(args: &[String], flag_idx: usize) -> Option<String> {
 }
 
 fn default_install_path(product: &str) -> PathBuf {
-    // Per the spec we install to a user-local path (no admin).
-    // LOCALAPPDATA is the natural fit for a non-elevated installer.
+    // User-local path, no admin needed.
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         return PathBuf::from(local).join("Programs").join(product);
     }

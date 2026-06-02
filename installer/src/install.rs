@@ -4,31 +4,26 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Write the uninstaller + metadata to a per-user data folder OUTSIDE the app
-/// directory, and register the product under
-/// HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall.
+/// Write the uninstaller + metadata to a per-user data folder outside the app
+/// directory and register the product under HKCU Uninstall.
 ///
-/// Keeping `uninstall.exe` + `installer_info.json` + `installer_manifest.json`
-/// in `%LOCALAPPDATA%\<publisher>\Uninstall\<product>` means a user who deletes
-/// the app folder by hand still has a working uninstaller (no orphan Add/Remove
-/// entry). Mirrors InstallShield's "Installation Information" folder.
+/// Keeping the uninstaller + metadata in `%LOCALAPPDATA%\<publisher>\Uninstall\
+/// <product>` means deleting the app folder by hand never orphans the
+/// Add/Remove entry.
 pub fn finalize(
     install_dir: &Path,
     payload: &InstallerPayload,
     uninstaller_bytes: &[u8],
 ) -> Result<()> {
-    // Per-user uninstall data folder; fall back to the app dir only if
-    // %LOCALAPPDATA% can't be resolved (should never happen on Windows).
+    // Fall back to the app dir only if %LOCALAPPDATA% can't be resolved.
     let data_dir = common::paths::uninstall_dir(&payload.publisher, &payload.product)
         .unwrap_or_else(|| install_dir.to_path_buf());
     fs::create_dir_all(&data_dir)
         .with_context(|| format!("create uninstall data dir {}", data_dir.display()))?;
 
-    // Atomic + retrying write: writing a fresh `.exe` is the prime Defender
-    // real-time trigger (it locks the new file to scan it the moment it's
-    // created). A bare `fs::write` here would intermittently fail the install
-    // *after* every product file is already in place. `write_atomic` stages a
-    // `.tmp` and retries the rename past the scan lock.
+    // Atomic + retrying write: a fresh `.exe` is the prime Defender trigger
+    // (it locks the new file to scan it), so a bare write could fail the
+    // install after every product file is already in place.
     let uninstaller_path = data_dir.join("uninstall.exe");
     common::utils::write_atomic(&uninstaller_path, uninstaller_bytes)
         .with_context(|| format!("write {}", uninstaller_path.display()))?;
@@ -48,9 +43,7 @@ pub fn finalize(
         associations: payload.associations.clone(),
     };
 
-    // All installer metadata lives in the data dir (NOT the app folder, which
-    // holds only the product's files). Atomic writes: a half-written file
-    // would break uninstall / version checks.
+    // Atomic writes: a half-written file would break uninstall / version checks.
     common::utils::write_atomic(
         &data_dir.join("installer_info.json"),
         serde_json::to_string_pretty(&info)?.as_bytes(),
@@ -76,7 +69,6 @@ pub fn finalize(
         let target = install_dir.join(&payload.manifest.exe);
         create_shortcuts(&payload.product, install_dir, &target);
 
-        // File associations point the shell at this exe.
         if !payload.associations.is_empty() {
             // Normalize separators so the registry command reads cleanly.
             let exe_str = target.to_string_lossy().replace('/', "\\");
@@ -87,8 +79,7 @@ pub fn finalize(
     Ok(())
 }
 
-/// Drop a desktop and a Start Menu shortcut pointing at the installed exe.
-/// Mirrors the launcher's pattern (`mslnk` + `dirs`); paths come from `common::shortcuts`.
+/// Drop a desktop and Start Menu shortcut pointing at the installed exe.
 pub fn create_shortcuts(product: &str, install_dir: &Path, target: &Path) {
     for path in common::shortcuts::paths_for(product) {
         if let Some(parent) = path.parent() {

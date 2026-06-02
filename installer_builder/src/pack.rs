@@ -32,9 +32,8 @@ pub fn run(args: &PackArgs) -> Result<()> {
 
     let signing = load_signing_key(&args.priv_key)?;
 
-    // Toolchain-free mode: a prebuilt stub + uninstaller are supplied, so we
-    // never invoke cargo. The stub already has its public key baked in, so
-    // --pub-key isn't needed (the signing key must match that baked key).
+    // Toolchain-free mode: prebuilt stub + uninstaller supplied, so we never
+    // invoke cargo. The stub already has its public key baked in.
     let prebuilt = args.installer_stub.is_some() || args.uninstaller.is_some();
     if prebuilt && (args.installer_stub.is_none() || args.uninstaller.is_none()) {
         bail!("--installer-stub and --uninstaller must be provided together");
@@ -162,8 +161,7 @@ pub fn run(args: &PackArgs) -> Result<()> {
         }
         None => build_uninstaller(args.reuse_stub)?,
     };
-    // Stage uninstaller into %TEMP%, stamp icons there, then read its bytes
-    // for the installer RCDATA payload. Avoids mutating the cached release artifact.
+    // Stamp icons on a %TEMP% copy so we don't mutate the cached release artifact.
     let staged_uninstaller = std::env::temp_dir().join(format!(
         "rustinst-uninst-{}.exe",
         std::process::id()
@@ -188,7 +186,7 @@ pub fn run(args: &PackArgs) -> Result<()> {
     fs::copy(&stub, &args.out).with_context(|| format!("copy {} -> {}", stub.display(), args.out.display()))?;
     println!("Copied stub to {}", args.out.display());
 
-    // Small resources via the resource API (manifest, uninstaller, payload len).
+    // Small resources via the resource API.
     embed::embed_resources(
         &args.out,
         signed_json.as_bytes(),
@@ -208,8 +206,8 @@ pub fn run(args: &PackArgs) -> Result<()> {
     {
         eprintln!("warning: version-info embed failed: {e:#}");
     }
-    // Big payload appended as a PE overlay - AFTER all resource passes, so they
-    // don't drop it; BEFORE signing. No size ceiling; installer mmaps it.
+    // Payload appended as a PE overlay, after all resource passes (so they
+    // don't drop it) and before signing. No size ceiling; installer mmaps it.
     embed::append_payload(&args.out, &zip_bytes)?;
     println!(
         "Embedded signed manifest + uninstaller{} + version, appended {}-byte payload overlay into {}",
@@ -247,9 +245,8 @@ fn load_pub_key_hex(path: &Path) -> Result<String> {
     Ok(hex_data)
 }
 
-/// Reject two paths differing only by case: Windows / NTFS is case-insensitive,
-/// so they'd map to the same on-disk file and clobber. (Matters for cross-OS
-/// builds where both can exist in the source tree.)
+/// Reject two paths differing only by case: on case-insensitive NTFS they'd map
+/// to the same file and clobber. (Matters for cross-OS builds.)
 fn check_case_collisions(files: &[String]) -> Result<()> {
     let mut seen: HashMap<String, String> = HashMap::new();
     for f in files {
@@ -292,7 +289,6 @@ fn build_full(input: &Path, exe: &str, version: &str) -> Result<(Vec<u8>, Manife
         .map(|(rel, entry, _)| (rel, entry))
         .collect();
 
-    // Re-read files for zipping (sequential - zip crate isn't thread-safe writer).
     let zip_bytes = write_zip(input, &files, &[], &HashMap::new())?;
 
     let manifest = Manifest {
@@ -458,14 +454,11 @@ fn build_patch(
     Ok((zip_bytes, manifest))
 }
 
-/// Extensions whose contents are already compressed. Re-running zstd over them
-/// wastes build CPU for ~0% size gain AND forces a pointless decompress at
-/// install time. They're stored verbatim (`CompressionMethod::Stored`) instead.
+/// Extensions already compressed: zstd gains ~0% and forces a pointless
+/// decompress at install time, so they're `Stored` verbatim. Entropy-coded
+/// media only - archive containers (.zip/.gz/...) can wrap weakly-compressed
+/// data zstd still shrinks, so we let zstd try those.
 const ALREADY_COMPRESSED: &[&str] = &[
-    // Entropy-coded media only - zstd reliably gains ~0% here. Deliberately NOT
-    // listing archive containers (.zip/.gz/.7z/...): they can wrap weakly- or
-    // un-compressed data that zstd-19 still shrinks a lot (measured: a 520 MB
-    // .zip lost ~94 MB under zstd), so we let zstd try those.
     "png", "jpg", "jpeg", "gif", "webp", "avif", "heic",
     "mp3", "aac", "ogg", "opus", "flac", "mp4", "m4v", "mov", "avi", "mkv", "webm",
     "woff2", // brotli-compressed internally
@@ -484,19 +477,17 @@ fn method_for(name: &str) -> zip::CompressionMethod {
     }
 }
 
-/// Compress one file into a standalone single-entry zip held in memory. Called
-/// from many rayon workers in parallel - each owns its own `ZipWriter`, so no
-/// shared mutable state. The chosen method (Stored/Zstd) is recorded in the
-/// entry header, so the merge step and the installer read it back transparently.
+/// Compress one file into a standalone single-entry zip in memory. Run from
+/// many rayon workers in parallel, each owning its own `ZipWriter`. The chosen
+/// method is recorded in the entry header so merge + installer read it back.
 fn compress_entry(entry_name: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     let method = method_for(entry_name);
     let mut opts = SimpleFileOptions::default()
         .compression_method(method)
-        // Files can exceed 4 GB individually; flip on Zip64 when needed.
         .large_file(bytes.len() as u64 >= u32::MAX as u64);
     if method == zip::CompressionMethod::Zstd {
-        // Level 19: high ratio, decompress speed level-independent. Compress cost
-        // is build-time only. Range -7..=22; 19 sits before the 20+ time cliff.
+        // Level 19: high ratio, sits before the 20+ compress-time cliff;
+        // decompress speed is level-independent.
         opts = opts.compression_level(Some(19));
     }
     let cap = bytes.len() / 2 + 64;
@@ -506,15 +497,10 @@ fn compress_entry(entry_name: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 
-/// Build a zip in memory.
-///
-/// - Files listed in `full_paths` go under `full/<rel>` (read from `input`).
-/// - Files listed in `patch_paths` go under the file path recorded by the builder.
-///
-/// Compression runs in parallel (one rayon worker per file, each producing a
-/// standalone single-entry zip), then the workers' outputs are merged into the
-/// final archive by raw byte copy (`raw_copy_file` - no recompression). This
-/// saturates every core; the old single-threaded `ZipWriter` left 23/24 idle.
+/// Build a zip in memory. `full_paths` go under `full/<rel>`; `patch_paths`
+/// under their recorded path. Compression runs one rayon worker per file (each
+/// a standalone single-entry zip), then the outputs are merged by raw byte copy
+/// (`raw_copy_file`, no recompression) to saturate every core.
 fn write_zip(
     input: &Path,
     full_paths: &[String],
@@ -543,10 +529,9 @@ fn write_zip(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // PHASE 2 (sequential): merge each mini-zip's single entry into the master
-    // by raw copy - bytes are already compressed, so this is just memcpy +
-    // header rewrite, fast and single-threaded. `into_iter` frees each mini as
-    // it's consumed to keep peak memory down.
+    // PHASE 2 (sequential): merge each mini-zip's entry by raw copy (already
+    // compressed, so just memcpy + header rewrite). `into_iter` frees each mini
+    // as consumed to keep peak memory down.
     let mut zip = ZipWriter::new(Cursor::new(Vec::with_capacity(16 * 1024 * 1024)));
     for mini in minis.into_iter() {
         let mut src = zip::ZipArchive::new(Cursor::new(mini))

@@ -5,10 +5,9 @@ use common::models::{InstallInfo, Manifest};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The folder this uninstaller runs from. Since the installer places
-/// `uninstall.exe` + metadata in `%LOCALAPPDATA%\<publisher>\Uninstall\<product>`,
-/// this is the *data* dir, not the application directory. The real app
-/// directory is read from `installer_info.json` (`install_dir`).
+/// The folder this uninstaller runs from: the data dir
+/// (`%LOCALAPPDATA%\<publisher>\Uninstall\<product>`), not the app dir. The app
+/// dir is read from `installer_info.json`.
 pub fn self_dir() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     exe.parent()
@@ -28,11 +27,9 @@ enum Removal {
     Stuck,
 }
 
-/// Schedule `path` for deletion on the next reboot. Uses
-/// `MoveFileEx(.., MOVEFILE_DELAY_UNTIL_REBOOT)`, which records the pending
-/// rename under HKLM and therefore only succeeds when the process is elevated;
-/// returns `false` otherwise. Best-effort last resort - the retry in
-/// `remove_file_robust` already clears the common case (a transient AV scan).
+/// Schedule `path` for deletion on next reboot. `MoveFileEx(MOVEFILE_DELAY_-
+/// UNTIL_REBOOT)` records the pending rename under HKLM, so it only succeeds
+/// when elevated; `false` otherwise. Best-effort last resort.
 #[cfg(windows)]
 fn schedule_delete_on_reboot(path: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
@@ -53,10 +50,8 @@ fn schedule_delete_on_reboot(_path: &Path) -> bool {
     false
 }
 
-/// Remove a file, surviving transient locks (Defender/other AV scanning a file,
-/// the indexer, Explorer) via the shared retry policy. If it's still locked
-/// after the retry budget, fall back to a reboot-time delete so we don't leave
-/// an orphan behind.
+/// Remove a file, surviving transient AV/indexer locks via the shared retry
+/// policy; if still locked, fall back to a reboot-time delete.
 fn remove_file_robust(path: &Path) -> Removal {
     if !path.exists() {
         return Removal::Absent;
@@ -98,9 +93,8 @@ pub fn read_manifest(install_dir: &Path) -> Result<Manifest> {
     serde_json::from_str(&s).context("parse installer_manifest.json")
 }
 
-/// Robustly remove a single payload file (retry transient locks, then schedule
-/// reboot-delete), logging if it stays stuck. For the interactive uninstall
-/// loop, which removes files one at a time to report per-file progress.
+/// Robustly remove a single payload file, logging if it stays stuck. For the
+/// interactive uninstall loop, which removes files one at a time for progress.
 pub fn remove_one_payload(path: &Path) {
     if let Removal::Stuck = remove_file_robust(path) {
         common::log::warn(format!("could not remove (locked): {}", path.display()));
@@ -108,8 +102,7 @@ pub fn remove_one_payload(path: &Path) {
 }
 
 /// Remove every payload file from `manifest`. Returns the count handled
-/// (removed now or queued for reboot). Files that stay stuck (still locked and
-/// not queueable) are logged so they aren't lost silently.
+/// (removed now or queued for reboot); stuck files are logged.
 pub fn remove_payload_files(install_dir: &Path, manifest: &Manifest) -> usize {
     let mut count = 0;
     for rel in manifest.files.keys() {

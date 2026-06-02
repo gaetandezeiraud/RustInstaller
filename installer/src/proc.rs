@@ -1,16 +1,8 @@
 //! Close a running copy of the app we are about to install over.
 //!
-//! Data-safe by design - we NEVER force-terminate:
-//!   1. Find every process whose exe is the one we're updating
-//!      (match by full path inside `install_dir`, fall back to file name).
-//!   2. Focus its main window and post `WM_CLOSE` so the app runs its own
-//!      "save your work?" prompt.
-//!   3. Wait until the user finishes closing it. We re-focus + re-send
-//!      `WM_CLOSE` periodically so the prompt stays visible, but we let the
-//!      user take as long as they need. The only way out without closing is
-//!      to Cancel the install.
-//!
-//! No-op on a fresh install (nothing running) or when `exe_rel` is empty.
+//! Never force-terminates: find every process running the target exe, post
+//! `WM_CLOSE` to its windows (so the app can prompt to save), and wait for the
+//! user to close it, re-nudging periodically. No-op on a fresh install.
 
 #![cfg(windows)]
 

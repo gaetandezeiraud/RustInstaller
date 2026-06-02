@@ -10,8 +10,8 @@ const OVERLAY_MAGIC: &[u8; 8] = b"RIIPLD01";
 pub struct LoadedPayload {
     pub payload: InstallerPayload,
     pub uninstaller_bytes: Vec<u8>,
-    /// The whole exe, memory-mapped. The payload zip is a slice into this, so
-    /// even multi-GB payloads stay demand-paged instead of copied into RAM.
+    /// The whole exe, memory-mapped; the payload zip is a slice into it, so
+    /// multi-GB payloads stay demand-paged instead of copied into RAM.
     #[cfg(windows)]
     map: memmap2::Mmap,
     #[cfg(windows)]
@@ -21,7 +21,7 @@ pub struct LoadedPayload {
 }
 
 impl LoadedPayload {
-    /// Borrowed view of the payload zip (mmap-backed; no heap copy).
+    /// Borrowed view of the payload zip (mmap-backed, no heap copy).
     #[cfg(windows)]
     pub fn zip(&self) -> &[u8] {
         &self.map[self.zip_off..self.zip_off + self.zip_len]
@@ -50,8 +50,8 @@ pub fn load_and_verify() -> Result<LoadedPayload> {
     let payload: InstallerPayload =
         serde_json::from_str(&signed.payload_json).context("parse inner payload JSON")?;
 
-    // Map our own exe and locate the overlay from the PE section table (robust
-    // to a trailing Authenticode certificate appended after the overlay).
+    // Locate the overlay from the PE section table (robust to a trailing
+    // Authenticode certificate appended after it).
     let exe = std::env::current_exe().context("locate own exe")?;
     let file = std::fs::File::open(&exe).with_context(|| format!("open {}", exe.display()))?;
     let map = unsafe { memmap2::Mmap::map(&file) }.context("mmap own exe")?;
@@ -71,7 +71,7 @@ pub fn load_and_verify() -> Result<LoadedPayload> {
         );
     }
 
-    // Verify BLAKE3 of the payload (streamed over the mmap, not copied).
+    // Verify BLAKE3 of the payload, over the mmap (not copied).
     let actual_hash = blake3::hash(&map[zip_off..zip_off + zip_len]).to_hex().to_string();
     if actual_hash != payload.payload_blake3 {
         bail!(

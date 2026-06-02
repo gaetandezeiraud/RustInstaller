@@ -1,9 +1,7 @@
-//! Stage 2: runs from `%TEMP%` after Stage 1 spawned us. Waits for the parent
-//! process (Stage 1) to fully exit so the `uninstall.exe` lock is released,
-//! then removes the application dir AND the data dir (where uninstall.exe +
-//! metadata live), and finally schedules our own removal via
-//! `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)` so Windows cleans us up at next
-//! reboot. No `cmd.exe`, no console flash.
+//! Stage 2: runs from `%TEMP%` after Stage 1 spawned us. Waits for Stage 1 to
+//! exit (releasing the `uninstall.exe` lock), removes the app dir and data dir,
+//! then schedules its own removal via `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)`.
+//! No `cmd.exe`, no console flash.
 
 use crate::ui::{self, StepCounter, UninstallParams};
 use anyhow::Result;
@@ -56,9 +54,8 @@ pub fn run(
                 remove_dir_retry(&app_dir_w);
             }
 
-            // Remove the data dir (uninstall.exe + metadata). This is where we
-            // were launched from; the running copy is the %TEMP% one, so the
-            // original is free to delete.
+            // Remove the data dir we were launched from (the running copy is
+            // the %TEMP% one, so the original is free to delete).
             remove_dir_retry(&data_dir_w);
             // Best-effort: prune now-empty parent folders (Uninstall, publisher).
             if let Some(parent) = data_dir_w.parent() {

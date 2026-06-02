@@ -12,9 +12,8 @@ use zip::ZipArchive;
 const PATCHES_PREFIX: &str = "patches/";
 const FULL_PREFIX: &str = "full/";
 
-/// A patch was run against the wrong installed version. The install was NOT
-/// modified - the existing version still works. The user needs the matching
-/// patch or the full installer for the target version.
+/// A patch was run against the wrong installed version. The install was not
+/// modified.
 #[derive(Debug)]
 pub struct VersionMismatch {
     pub expected_from: String,
@@ -40,15 +39,12 @@ impl std::fmt::Display for VersionMismatch {
 
 impl std::error::Error for VersionMismatch {}
 
-/// Reject manifest paths that could escape the install directory.
-/// The payload is Ed25519-signed, but this is cheap defense-in-depth against a
-/// compromised signing key or a builder bug: only plain, relative,
-/// forward-only components are allowed.
+/// Reject manifest paths that could escape the install directory. Defense in
+/// depth behind the Ed25519 signature: only plain, relative components allowed.
 fn safe_rel(rel: &str) -> Result<()> {
     if rel.is_empty() {
         bail!("empty path in manifest");
     }
-    // No drive letter / UNC / absolute root.
     let p = Path::new(rel);
     if p.is_absolute() || rel.contains(':') {
         bail!("unsafe absolute path in manifest: {}", rel);
@@ -56,24 +52,21 @@ fn safe_rel(rel: &str) -> Result<()> {
     for c in p.components() {
         match c {
             Component::Normal(_) => {}
-            // `..`, `/`, `C:`, `\\?\` etc. are all rejected.
             _ => bail!("unsafe path component in manifest: {}", rel),
         }
     }
     Ok(())
 }
 
-/// Make a path long-path-safe on Windows by prefixing `\\?\` (lifts the
-/// 260-char `MAX_PATH` limit). Requires an absolute, backslash-only path with
-/// no relative components, so we normalize first. No-op if already prefixed or
-/// if anything can't be resolved (falls back to the original path).
+/// Prefix `\\?\` to lift the 260-char `MAX_PATH` limit. Requires an absolute,
+/// backslash-only path, so we normalize first. No-op if already prefixed or
+/// unresolvable.
 #[cfg(windows)]
 fn long_path(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if s.starts_with(r"\\?\") {
         return p.to_path_buf();
     }
-    // Resolve to absolute.
     let abs = if p.is_absolute() {
         p.to_path_buf()
     } else {
@@ -84,7 +77,7 @@ fn long_path(p: &Path) -> PathBuf {
     };
     let norm = abs.to_string_lossy().replace('/', "\\");
     if norm.starts_with(r"\\") {
-        // UNC path: \\server\share -> \\?\UNC\server\share
+        // UNC: \\server\share -> \\?\UNC\server\share
         PathBuf::from(format!(r"\\?\UNC\{}", norm.trim_start_matches('\\')))
     } else {
         PathBuf::from(format!(r"\\?\{}", norm))
@@ -123,14 +116,11 @@ pub struct InstallCtx<'a> {
 pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
     let manifest = &ctx.payload.manifest;
 
-    // Log to %TEMP% so diagnostics survive even when the install dir isn't
-    // writable (the exact failure we want logged). Copied into the install dir
-    // on success for the user / support.
+    // Log to %TEMP% so diagnostics survive when the install dir isn't writable.
     common::log::init(common::log::log_path_installer_temp(
         &ctx.payload.product,
         std::process::id(),
     ));
-    // Self-clean: drop this product's stale %TEMP% logs (> 14 days).
     common::log::prune_temp_logs(&ctx.payload.product, 14);
     let started = std::time::Instant::now();
     common::log::info(format!(
@@ -147,9 +137,8 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
         manifest.deleted_files.len()
     ));
 
-    // Single-instance lock per install dir: refuse a second installer touching
-    // the same target so two runs can't race on .installer_tmp / journal /
-    // backup. Held for the whole install; the OS frees it on exit or crash.
+    // Single-instance lock per install dir, so two runs can't race on the temp
+    // dirs. OS frees it on exit or crash.
     #[cfg(windows)]
     let _install_lock = acquire_install_lock(&ctx.install_dir)?;
 
@@ -171,9 +160,8 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
                 "patch refused: expected from_version={} found={}",
                 expected_from, current_ref
             ));
-            // Pre-flight refusal: nothing has been touched, the existing
-            // install is untouched and still works. Typed error so the caller
-            // can return a distinct exit code and a clear message.
+            // Pre-flight refusal, nothing touched. Typed error so the caller
+            // can return a distinct exit code.
             return Err(anyhow::Error::new(VersionMismatch {
                 expected_from: expected_from.to_string(),
                 found: current_ref.to_string(),
@@ -186,10 +174,7 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
 
     check_disk_space(&ctx.install_dir, manifest, ctx.payload.kind)?;
 
-    // Close any running copy of the target app before touching its files.
-    // Data-safe: focus window + WM_CLOSE so the app can prompt to save, then
-    // wait for the user to actually close it. Never force-killed. No-op on a
-    // fresh install. Cancelling the install aborts the wait.
+    // Close any running copy of the target app first (WM_CLOSE, never killed).
     #[cfg(windows)]
     {
         let pcb = ctx.on_progress.clone();
@@ -203,15 +188,12 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
 
     let temp_dir = ctx.install_dir.join(".installer_tmp");
 
-    // If a previous run was interrupted mid-commit, roll the install back to
-    // its pre-install state before doing anything else.
+    // Roll back a commit interrupted by a previous run before doing anything.
     recover_if_interrupted(&temp_dir, &ctx.install_dir);
 
-    // Fresh staging + backup areas. A leftover temp here (no commit journal)
-    // means a previous run was interrupted during *staging* - the live install
-    // was never touched, so we just discard the stale staging and start over.
-    // Re-running is the resume path: files already correct are hash-skipped
-    // below, so only the remaining work is redone.
+    // Fresh staging + backup areas. A leftover temp with no journal means a
+    // previous run was interrupted during staging (live install untouched), so
+    // discard it and start over; correct files are hash-skipped below.
     let staged_dir = temp_dir.join("staged");
     let backup_dir = temp_dir.join("backup");
     if temp_dir.exists() {
@@ -235,14 +217,10 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
 
     // ---- PHASE 1: STAGE (parallel) ------------------------------------
     // Build every new/changed file in `staged/`, verified by hash. The live
-    // install is NOT touched here, so cancelling or crashing during staging
-    // leaves the existing install fully intact.
-    //
-    // Files are independent (each writes its own `staged_name`), so staging
-    // fans out across cores. Each rayon worker opens its OWN `ZipArchive` view
-    // over the shared (mmap-backed) byte slice; `map_init` builds it once per
-    // worker thread, not once per file, so the central-directory parse is paid
-    // ~once per core rather than per entry.
+    // install is not touched, so cancelling/crashing here leaves it intact.
+    // Files are independent, so staging fans out across cores; `map_init` gives
+    // each worker its own `ZipArchive` view over the shared mmap slice (one
+    // central-directory parse per core, not per file).
     let staged: Vec<Result<Option<String>>> = entries
         .par_iter()
         .map_init(
@@ -259,7 +237,7 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
                 let dest = long_path(&ctx.install_dir.join(rel));
                 (ctx.on_progress)(done.load(Ordering::Relaxed), total_bytes, rel);
 
-                // Hash-skip if already correct (disabled in force_reinstall: rewrite all).
+                // Hash-skip if already correct (disabled in force_reinstall).
                 if dest.exists() && !ctx.payload.force_reinstall {
                     if let Ok(h) = hash_file(&dest) {
                         if h == entry.hash {
@@ -271,7 +249,6 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
                     }
                 }
 
-                // Per-worker archive view; rebuilt only if the worker's init failed.
                 let archive = archive
                     .as_mut()
                     .map_err(|e| anyhow::anyhow!("open embedded zip: {e}"))?;
@@ -285,8 +262,7 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
         )
         .collect();
 
-    // Surface the first staging error (cancel included). The live install was
-    // never touched during staging, so we just discard the temp area and bail.
+    // Surface the first staging error (cancel included); live install untouched.
     let mut to_commit: Vec<String> = Vec::new();
     for r in staged {
         match r {
@@ -299,15 +275,13 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
             }
         }
     }
-    // Parallel completion order is nondeterministic; restore a stable commit order.
-    to_commit.sort();
+    to_commit.sort(); // parallel completion order is nondeterministic
 
     // ---- PHASE 2: COMMIT ----------------------------------------------
-    // Everything is staged + verified. Now swap files into place. A journal
-    // records every path we touch so an interruption can be rolled back.
+    // Swap staged files into place. A journal records every touched path so an
+    // interruption can be rolled back.
     let mut deleted: Vec<String> = Vec::new();
     for rel in &manifest.deleted_files {
-        // Same path-safety gate as install files.
         if safe_rel(rel).is_err() {
             common::log::warn(format!("skipping unsafe deleted_files entry: {}", rel));
             continue;
@@ -317,13 +291,11 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
         }
     }
 
-    // force_reinstall: also remove any existing file that isn't part of this
-    // build (clean slate). Backed up like any delete, so still rollback-safe.
+    // force_reinstall: also remove existing files not in this build (clean
+    // slate). Backed up like any delete, so still rollback-safe.
     if ctx.payload.force_reinstall {
         if let Ok(existing) = common::utils::collect_files(&ctx.install_dir) {
             for rel in existing {
-                // Skip our transient staging dir; everything else not in the
-                // build is an orphan (installer metadata no longer lives here).
                 if rel.starts_with(".installer_tmp")
                     || manifest.files.contains_key(&rel)
                     || deleted.contains(&rel)
@@ -365,19 +337,15 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
             return Err(e).context("install failed and was rolled back");
         }
 
-        // Post-commit verification, still inside the transaction (backups are
-        // intact). Each committed file was already hash-checked while staging;
-        // this re-reads it from its final location to catch any corruption
-        // introduced by the write/rename itself (bad sector, FS glitch).
+        // Re-read each committed file from disk to catch corruption from the
+        // write/rename itself (bad sector, FS glitch). Still inside the
+        // transaction, backups intact.
         (ctx.on_progress)(total_bytes, total_bytes, "Verifying...");
         let mut corrupt = find_corrupt(&ctx.install_dir, manifest, &to_commit);
 
-        // Repair before resorting to a full rollback: every corrupt file's
-        // content is reproducible from the payload (full file in the zip, or a
-        // patch applied to the backed-up previous version), and re-writing to a
-        // fresh staged file + fresh location usually dodges a transient glitch.
-        // Backups are left untouched so a full rollback is still possible if
-        // repair can't make verification pass.
+        // Repair before a full rollback: corrupt content is reproducible from
+        // the payload, and rewriting to a fresh location dodges transient
+        // glitches. Backups stay untouched so rollback remains possible.
         if !corrupt.is_empty() {
             common::log::warn(format!(
                 "{} file(s) failed post-install verification - attempting repair from payload",
@@ -411,8 +379,7 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
             }
         }
 
-        // Repair exhausted and something is still corrupt - roll back to the
-        // previous version (backups are still intact).
+        // Repair exhausted and still corrupt - roll back to the previous version.
         if !corrupt.is_empty() {
             common::log::error(format!(
                 "post-install verification failed for {} file(s) after repair - rolling back",
@@ -428,14 +395,12 @@ pub fn install(ctx: InstallCtx<'_>) -> Result<()> {
         }
         common::log::info(format!("verified {} committed file(s)", to_commit.len()));
 
-        // Commit done + verified - drop the journal so recovery won't fire, then
-        // persist state and clean up. (A crash past this point self-heals on re-run.)
+        // Verified - drop the journal so recovery won't fire.
         let _ = fs::remove_file(journal_path(&temp_dir));
     }
 
-    // Installer metadata (version.json, manifest, info, uninstall.exe, log) is
-    // written to the per-user data dir by `install::finalize`, NOT into the app
-    // folder - the app folder holds only the product's own files.
+    // Installer metadata is written to the per-user data dir by
+    // `install::finalize`, not into the app folder.
     cleanup(&temp_dir);
 
     common::log::info(format!(
@@ -489,8 +454,7 @@ fn stage_file(
         }
     }
 
-    // Full file from zip - streamed in chunks so a huge file never lands fully
-    // in RAM (constant ~1 MB buffer), hashed inline as it's written.
+    // Full file from zip, streamed in ~1 MB chunks and hashed inline.
     let zip_rel = format!("{}{}", FULL_PREFIX, rel);
     let mut entry_rdr = archive
         .by_name(&zip_rel)
@@ -524,10 +488,9 @@ fn stage_file(
     Ok(())
 }
 
-/// RAII single-instance lock for one install dir, backed by a named mutex.
-/// Existence of the named object == an installer is active for this dir. The
-/// OS destroys it when the last handle closes (normal exit OR crash), so there
-/// is never a stale lock to clean up.
+/// RAII single-instance lock for one install dir, backed by a named mutex. The
+/// OS destroys it when the last handle closes (exit or crash), so it can never
+/// go stale.
 #[cfg(windows)]
 struct InstallLock(windows::Win32::Foundation::HANDLE);
 
@@ -603,20 +566,10 @@ fn check_writable(dir: &Path) -> Result<()> {
 const SPACE_BUFFER: u64 = 100 * 1024 * 1024; // 100 MB
 
 /// Verify the install volume has enough free space before writing anything.
-/// Bails with a human-readable message (also logged) when short.
 ///
-/// Space model for the two-phase commit:
-/// - **Staging** writes the *full* content of every changed file into
-///   `.installer_tmp/staged/` and they all coexist until commit. Worst case
-///   (every file changed) that is the whole install size. For a patch the
-///   staged output is the reconstructed *full* file, not the small patch blob,
-///   so patches cost the same as a full install here - `total_patch_size`
-///   would badly under-estimate.
-/// - **Commit** only renames files within the same volume (dest→backup,
-///   staged→dest), which consumes no additional space.
-///
-/// So the peak extra space needed is bounded by the total install size plus a
-/// safety buffer, regardless of full vs patch.
+/// Peak extra space = total install size + buffer, for both full and patch:
+/// staging writes the reconstructed full content of every changed file (a patch
+/// stages the full file, not the small blob), and commit only renames in-place.
 fn check_disk_space(install_dir: &Path, manifest: &Manifest, kind: PayloadKind) -> Result<()> {
     let total_file_bytes: u64 = manifest.files.values().map(|e| e.size).sum();
     let required = total_file_bytes.saturating_add(SPACE_BUFFER);
@@ -689,8 +642,7 @@ fn hash_file(path: &Path) -> Result<String> {
 
 // ---- Two-phase commit primitives --------------------------------------
 
-/// Max attempts for a single rename when the target is briefly locked
-/// (AV scanner, Explorer, indexer). 50 × 100 ms ≈ 5 s.
+/// Retry budget for a rename briefly locked by AV/Explorer/indexer. ~5 s.
 const MOVE_RETRIES: usize = 50;
 const MOVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -856,10 +808,8 @@ fn cleanup(temp_dir: &Path) {
     let _ = fs::remove_dir_all(temp_dir);
 }
 
-/// Re-read each just-committed file from its final location and return the
-/// subset whose BLAKE3 doesn't match the manifest (corrupt, missing, or
-/// unreadable after the write/rename). Re-hashing is independent per file, so
-/// it fans out across cores. Used inside the install transaction.
+/// Re-hash each committed file and return those that don't match the manifest
+/// (corrupt, missing, or unreadable). Parallel; used inside the transaction.
 fn find_corrupt(install_dir: &Path, manifest: &Manifest, committed: &[String]) -> Vec<String> {
     committed
         .par_iter()
@@ -889,20 +839,13 @@ fn find_corrupt(install_dir: &Path, manifest: &Manifest, committed: &[String]) -
         .collect()
 }
 
-/// Maximum repair passes over the corrupt set before falling back to a full
-/// rollback. A pass re-writes every still-corrupt file from the payload to a
-/// fresh staged file + fresh on-disk location, which clears transient glitches;
-/// a genuinely bad sector that survives this many tries gets a clean rollback.
+/// Repair passes over the corrupt set before falling back to a full rollback.
 const VERIFY_REPAIR_ATTEMPTS: usize = 2;
 
 /// Re-stage each corrupt file from the payload and move it back into place,
-/// WITHOUT disturbing the backups (so a full rollback stays possible if repair
-/// ultimately fails). Each worker opens its own `ZipArchive` view of the
-/// (mmap-backed) payload, exactly like staging.
-///
-/// Patch entries are re-applied against the backed-up previous version, which
-/// `commit_one` saved before the (now-corrupt) overwrite. New files and
-/// full-file entries come straight from `full/<rel>` in the zip.
+/// leaving the backups intact so rollback stays possible. Patch entries are
+/// re-applied against the backed-up previous version; full/new files come from
+/// `full/<rel>` in the zip.
 fn repair_corrupt(
     zip_bytes: &[u8],
     kind: PayloadKind,
@@ -924,17 +867,15 @@ fn repair_corrupt(
                     .as_mut()
                     .map_err(|e| anyhow::anyhow!("open embedded zip: {e}"))?;
 
-                // Old version (patch input) = the backup taken at commit time.
-                // Absent for brand-new files, whose entry has no patch and is
-                // shipped in full, so `stage_file` falls through to the zip.
+                // Patch input = the backup from commit time. Absent for new
+                // files, which ship in full and fall through to the zip.
                 let old = long_path(&backup_dir.join(staged_name(rel)));
                 let staged_path = staged_dir.join(staged_name(rel));
                 let _ = fs::remove_file(&staged_path);
                 stage_file(archive, kind, rel, entry, &old, &staged_path)
                     .with_context(|| format!("re-stage {} for repair", rel))?;
 
-                // Overwrite the corrupt file in place. The backup is NOT touched
-                // (it still holds the pre-install version for rollback).
+                // Overwrite the corrupt file; backup left intact for rollback.
                 let dest = long_path(&install_dir.join(rel));
                 let staged = long_path(&staged_path);
                 move_retry(&staged, &dest)

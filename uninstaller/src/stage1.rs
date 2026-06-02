@@ -100,10 +100,7 @@ pub fn run(silent: bool) -> Result<()> {
             let counter = StepCounter::new(total_steps, progress);
             let tr = ui::tr();
 
-            // 1. Payload files (in the app dir). Robust removal: retry past a
-            // transient AV/indexer lock, then queue reboot-delete if still held
-            // (matches the silent path; a bare remove here would orphan files a
-            // scanner happened to be touching).
+            // 1. Payload files - robust removal (retry locks, then reboot-delete).
             for rel in manifest_owned.files.keys() {
                 let p = app_dir_owned.join(rel);
                 cleanup::remove_one_payload(&p);

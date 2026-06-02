@@ -1,13 +1,10 @@
 //! Copy the icon resources from the packaged exe into the installer and
 //! uninstaller .exe so Explorer shows the right thumbnail.
 //!
-//! Strategy: copy **every** `RT_GROUP_ICON` and **every** `RT_ICON` from the
-//! source (the user's exe) verbatim, preserving each resource's original
-//! identifier (integer id or string name). This makes the target's icon
-//! resource tree identical to the source, so Windows/Explorer pick exactly the
-//! same application icon - no guessing which group is "the" icon, no rebuilt
-//! group directories that can drift from the source. RT_RCDATA (our payload)
-//! is a different resource type so it never collides.
+//! Copies every `RT_GROUP_ICON` and `RT_ICON` verbatim, preserving original
+//! identifiers, so the target's icon tree is identical to the source and
+//! Explorer picks the same icon (no guessing, no rebuilt groups that can
+//! drift). RT_RCDATA (our payload) is a different type, so no collision.
 
 #![cfg(windows)]
 
