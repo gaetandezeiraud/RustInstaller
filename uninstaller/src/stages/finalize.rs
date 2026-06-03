@@ -1,7 +1,7 @@
-//! Stage 2: runs from `%TEMP%` after Stage 1 spawned us. Waits for Stage 1 to
-//! exit (releasing the `uninstall.exe` lock), removes the app dir and data dir,
-//! then schedules its own removal via `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)`.
-//! No `cmd.exe`, no console flash.
+//! Finalize step: runs from `%TEMP%` after the uninstall step spawned us. Waits for
+//! the uninstall step to exit (releasing the `uninstall.exe` lock), removes the app
+//! dir and data dir, then schedules its own removal via
+//! `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)`. No `cmd.exe`, no console flash.
 
 use crate::ui::{self, StepCounter, UninstallParams};
 use anyhow::Result;
@@ -17,12 +17,12 @@ pub fn run(
     product: String,
     parent_pid: Option<u32>,
 ) -> Result<()> {
-    // Continue stage 1's log file (keyed by stage 1's PID) so the whole
+    // Continue the uninstall step's log file (keyed by its PID) so the whole
     // uninstall is in one %TEMP% file for support.
     let log_id = parent_pid.unwrap_or_else(std::process::id);
-    common::log::init(common::log::log_path_for_stage2(&product, log_id));
+    common::log::init(common::log::log_path_uninstall_temp(&product, log_id));
     common::log::info(format!(
-        "stage2 start: product={} app_dir={} data_dir={} parent_pid={:?}",
+        "finalize start: product={} app_dir={} data_dir={} parent_pid={:?}",
         product,
         app_dir.display(),
         data_dir.display(),
@@ -34,12 +34,12 @@ pub fn run(
 
     let tr = crate::ui::tr();
     let params = UninstallParams {
-        title: tr.fmt("uninstall.stage2_title", &[("product", &product)]),
-        subtitle: tr.get("uninstall.stage2_subtitle"),
+        title: tr.fmt("uninstall.finalize_title", &[("product", &product)]),
+        subtitle: tr.get("uninstall.finalize_subtitle"),
         confirm_text: String::new(), // never shown - we auto-advance to Progress
         worker: Box::new(move |progress: Arc<dyn Fn(u64, u64, &str) + Send + Sync>| {
             let tr = crate::ui::tr();
-            // Wait for Stage 1 to exit so file locks release.
+            // Wait for the uninstall step to exit so file locks release.
             if let Some(pid) = parent_pid {
                 wait_for_pid(pid, Duration::from_secs(10));
             }
@@ -68,7 +68,7 @@ pub fn run(
 
             // Schedule self for deletion on next reboot (no cmd, no flash).
             schedule_self_delete_on_reboot();
-            common::log::info("stage2 complete; self scheduled for delete-on-reboot");
+            common::log::info("finalize complete; self scheduled for delete-on-reboot");
             counter.step(&tr.get("uninstall.done"));
 
             // Brief pause so user sees the 100% bar.

@@ -620,7 +620,7 @@ write, so even a crashed process leaves a complete file.
 | Operation | Path | Notes |
 |---|---|---|
 | **Install** (any mode) | `<install_dir>\install.log` | Removed by the uninstaller, so it lives exactly as long as the product. |
-| **Uninstall - Stage 1 + Stage 2** | `%TEMP%\rustinst-uninstall-<stage1-pid>.log` | Single combined file. Stage 1's PID is the identifier; Stage 2 receives it as `parent_pid` and appends. Survives the `rmdir` of the install directory. |
+| **Uninstall + Finalize** | `%TEMP%\rustinst-uninstall-<uninstall-pid>.log` | Single combined file. Uninstall step's PID is the identifier; finalize step receives it as `parent_pid` and appends. Survives the `rmdir` of the install directory. |
 
 Sample install log:
 ```
@@ -634,13 +634,13 @@ Sample install log:
 
 Sample uninstall log:
 ```
-2026-05-30T06:42:29.768Z INFO  stage1 start: product=testapp version=1.0 install_dir=C:\...\install_target silent=true
+2026-05-30T06:42:29.768Z INFO  uninstall start: product=testapp version=1.0 install_dir=C:\...\install_target silent=true
 2026-05-30T06:42:29.770Z INFO  removed 3 payload files
 2026-05-30T06:42:29.771Z INFO  removed shortcuts
 2026-05-30T06:42:29.771Z INFO  removed 2 state files
 2026-05-30T06:42:29.772Z INFO  unregistered HKCU\...\Uninstall\testapp
-2026-05-30T06:42:29.822Z INFO  stage2 start: product=testapp install_dir=... parent_pid=Some(27068)
-2026-05-30T06:42:29.845Z INFO  stage2 complete; self scheduled for delete-on-reboot
+2026-05-30T06:42:29.822Z INFO  finalize start: product=testapp install_dir=... parent_pid=Some(27068)
+2026-05-30T06:42:29.845Z INFO  finalize complete; self scheduled for delete-on-reboot
 ```
 
 Implementation lives in [common/src/log.rs](common/src/log.rs) - global

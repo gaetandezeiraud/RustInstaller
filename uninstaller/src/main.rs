@@ -1,8 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cleanup;
-mod stage1;
-mod stage2;
+mod stages;
 mod ui;
 
 use anyhow::Result;
@@ -20,23 +19,23 @@ fn run() -> Result<()> {
 
     ui::set_translator(common::i18n::Translator::detect(&args));
 
-    if let Some(idx) = args.iter().position(|a| a == "--stage2") {
+    if let Some(idx) = args.iter().position(|a| a == "--finalize") {
         let app_dir = args
             .get(idx + 1)
             .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("--stage2 needs <app_dir>"))?;
+            .ok_or_else(|| anyhow::anyhow!("--finalize needs <app_dir>"))?;
         let data_dir = args
             .get(idx + 2)
             .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("--stage2 needs <data_dir>"))?;
+            .ok_or_else(|| anyhow::anyhow!("--finalize needs <data_dir>"))?;
         let product = args
             .get(idx + 3)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("--stage2 needs <product>"))?;
+            .ok_or_else(|| anyhow::anyhow!("--finalize needs <product>"))?;
         let parent_pid = args.get(idx + 4).and_then(|s| s.parse::<u32>().ok());
-        return stage2::run(app_dir, data_dir, product, parent_pid);
+        return stages::finalize::run(app_dir, data_dir, product, parent_pid);
     }
 
     let silent = args.iter().any(|a| a == "--silent" || a == "/S");
-    stage1::run(silent)
+    stages::uninstall::run(silent)
 }
