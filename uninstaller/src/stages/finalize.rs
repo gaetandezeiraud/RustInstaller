@@ -6,7 +6,7 @@
 use crate::ui::{self, StepCounter, UninstallParams};
 use anyhow::Result;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -50,12 +50,12 @@ pub fn run(
             counter.step(&tr.get("uninstall.removing_install_dir"));
             // Remove the application dir (may be empty / already gone).
             if !app_dir_w.as_os_str().is_empty() {
-                remove_dir_retry(&app_dir_w);
+                common::utils::remove_dir_retry(&app_dir_w);
             }
 
             // Remove the data dir we were launched from (the running copy is
             // the %TEMP% one, so the original is free to delete).
-            remove_dir_retry(&data_dir_w);
+            common::utils::remove_dir_retry(&data_dir_w);
             // Best-effort: prune now-empty parent folders (Uninstall, publisher).
             if let Some(parent) = data_dir_w.parent() {
                 let _ = fs::remove_dir(parent); // "Uninstall"
@@ -78,19 +78,6 @@ pub fn run(
 
     let _ = ui::run(params);
     Ok(())
-}
-
-/// Recursively remove a directory, retrying through transient locks.
-fn remove_dir_retry(dir: &Path) {
-    for _ in 0..30 {
-        if !dir.exists() {
-            return;
-        }
-        if fs::remove_dir_all(dir).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
 }
 
 fn wait_for_pid(pid: u32, timeout: Duration) {
