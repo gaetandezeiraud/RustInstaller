@@ -43,7 +43,7 @@ pub fn run(silent: bool) -> Result<()> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            spawn_finalize(Path::new(""), &data_dir, &product)?;
+            spawn_finalize(None, &data_dir, &product)?;
             return Ok(());
         }
     };
@@ -125,7 +125,7 @@ pub fn run(silent: bool) -> Result<()> {
 
             // 6. Finalize step deletes the app dir + the data dir (incl. us) + self.
             common::log::info("spawning finalize step to delete app dir + data dir + self");
-            if let Err(e) = spawn_finalize(&app_dir_owned, &data_dir_owned, &info_owned.product) {
+            if let Err(e) = spawn_finalize(Some(&app_dir_owned), &data_dir_owned, &info_owned.product) {
                 common::log::error(format!("finalize spawn failed: {e:#}"));
                 ui::fatal(&tr.fmt("uninstall.spawn_failed", &[("err", &format!("{e:#}"))]));
             }
@@ -153,12 +153,14 @@ fn run_silent(
     cleanup::remove_empty_subdirs(app_dir);
     cleanup::unregister(&info.registry_key);
     common::log::info(format!("unregistered HKCU Uninstall\\{}", info.registry_key));
-    spawn_finalize(app_dir, data_dir, &info.product)
+    spawn_finalize(Some(app_dir), data_dir, &info.product)
 }
 
 /// Spawn the temp-copy finalize step that deletes the app dir + data dir + itself.
-/// `app_dir` may be empty (best-effort path when metadata was unreadable).
-fn spawn_finalize(app_dir: &Path, data_dir: &Path, product: &str) -> Result<()> {
+///
+/// `app_dir` is `None` when the installer metadata was unreadable; the finalize
+/// step will skip the app-dir removal in that case.
+fn spawn_finalize(app_dir: Option<&Path>, data_dir: &Path, product: &str) -> Result<()> {
     let self_exe = std::env::current_exe()?;
     let dest = staged_temp_path()?;
     // Retry past a transient AV scan of the freshly copied `.exe`; if this copy
@@ -166,13 +168,15 @@ fn spawn_finalize(app_dir: &Path, data_dir: &Path, product: &str) -> Result<()> 
     common::utils::copy_retry(&self_exe, &dest)
         .with_context(|| format!("copy finalize step to {}", dest.display()))?;
 
-    Command::new(&dest)
-        .arg("--finalize")
-        .arg(app_dir)
-        .arg(data_dir)
-        .arg(product)
-        .arg(std::process::id().to_string())
-        .creation_flags(DETACHED_PROCESS)
+    let mut cmd = Command::new(&dest);
+    cmd.arg("finalize")
+        .arg("--data-dir").arg(data_dir)
+        .arg("--product").arg(product)
+        .arg("--parent-pid").arg(std::process::id().to_string());
+    if let Some(dir) = app_dir {
+        cmd.arg("--app-dir").arg(dir);
+    }
+    cmd.creation_flags(DETACHED_PROCESS)
         .spawn()
         .with_context(|| format!("spawn {}", dest.display()))?;
     Ok(())

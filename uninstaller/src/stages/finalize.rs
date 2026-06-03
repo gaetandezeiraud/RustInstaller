@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 pub fn run(
-    app_dir: PathBuf,
+    app_dir: Option<PathBuf>,
     data_dir: PathBuf,
     product: String,
     parent_pid: Option<u32>,
@@ -24,14 +24,13 @@ pub fn run(
     common::log::info(format!(
         "finalize start: product={} app_dir={} data_dir={} parent_pid={:?}",
         product,
-        app_dir.display(),
+        app_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<none>".into()),
         data_dir.display(),
         parent_pid
     ));
 
-    let app_dir_w = app_dir.clone();
-    let data_dir_w = data_dir.clone();
-
+    // `app_dir` (Option<PathBuf>) and `data_dir` (PathBuf) are moved directly
+    // into the closure — intermediate clones are no longer needed.
     let tr = crate::ui::tr();
     let params = UninstallParams {
         title: tr.fmt("uninstall.finalize_title", &[("product", &product)]),
@@ -48,16 +47,16 @@ pub fn run(
             }
 
             counter.step(&tr.get("uninstall.removing_install_dir"));
-            // Remove the application dir (may be empty / already gone).
-            if !app_dir_w.as_os_str().is_empty() {
-                common::utils::remove_dir_retry(&app_dir_w);
+            // Remove the application dir; absent when metadata was unreadable.
+            if let Some(ref dir) = app_dir {
+                common::utils::remove_dir_retry(dir);
             }
 
             // Remove the data dir we were launched from (the running copy is
             // the %TEMP% one, so the original is free to delete).
-            common::utils::remove_dir_retry(&data_dir_w);
+            common::utils::remove_dir_retry(&data_dir);
             // Best-effort: prune now-empty parent folders (Uninstall, publisher).
-            if let Some(parent) = data_dir_w.parent() {
+            if let Some(parent) = data_dir.parent() {
                 let _ = fs::remove_dir(parent); // "Uninstall"
                 if let Some(grand) = parent.parent() {
                     let _ = fs::remove_dir(grand); // "<publisher>"

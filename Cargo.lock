@@ -1055,6 +1055,7 @@ name = "uninstaller"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "clap",
  "common",
  "embed-manifest",
  "serde",
