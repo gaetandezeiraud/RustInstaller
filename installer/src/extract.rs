@@ -502,7 +502,7 @@ fn acquire_install_lock(install_dir: &Path) -> Result<InstallLock> {
     let key = install_dir.to_string_lossy().to_lowercase().replace('/', "\\");
     let hash = blake3::hash(key.as_bytes()).to_hex();
     // Local\ namespace = per-session, which matches our per-user installs.
-    let name = format!("Local\\RustInstaller-Install-{}", &hash.as_str()[..32]);
+    let name = format!("Local\\Installway-Install-{}", &hash.as_str()[..32]);
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
 
     unsafe {

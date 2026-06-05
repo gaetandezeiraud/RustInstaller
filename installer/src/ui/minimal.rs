@@ -121,7 +121,7 @@ unsafe fn build_window(payload: &common::models::InstallerPayload) -> Result<Win
     helpers::init_progress_class();
     let hinstance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
 
-    let class_name = w!("RustInstallerMiniWnd");
+    let class_name = w!("InstallwayMiniWnd");
     let wc = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         style: WNDCLASS_STYLES(0),

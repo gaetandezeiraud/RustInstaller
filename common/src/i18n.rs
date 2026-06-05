@@ -6,7 +6,7 @@
 //!
 //! Detection on Windows uses `GetUserDefaultLocaleName` and takes the first
 //! 2 ISO-639 chars (`"en-US"` → `"en"`). A `--lang <code>` CLI flag and the
-//! `RUSTINSTALLER_LANG` env var both override detection. Unknown languages
+//! `INSTALLWAY_LANG` env var both override detection. Unknown languages
 //! fall back to English; missing keys fall back to English, then to the key
 //! literal so nothing ever returns an empty string.
 
@@ -70,7 +70,7 @@ impl Translator {
         Self { lang: DEFAULT_LANG }
     }
 
-    /// Detect from CLI args (`--lang <code>`), env (`RUSTINSTALLER_LANG`),
+    /// Detect from CLI args (`--lang <code>`), env (`INSTALLWAY_LANG`),
     /// then OS user locale, then default.
     pub fn detect(args: &[String]) -> Self {
         if let Some(idx) = args.iter().position(|a| a == "--lang") {
@@ -78,7 +78,7 @@ impl Translator {
                 return Self::for_lang(c);
             }
         }
-        if let Ok(c) = std::env::var("RUSTINSTALLER_LANG") {
+        if let Ok(c) = std::env::var("INSTALLWAY_LANG") {
             if !c.is_empty() {
                 return Self::for_lang(&c);
             }

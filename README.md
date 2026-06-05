@@ -1,8 +1,7 @@
-# RustInstaller
+# Installway
 
 Local, single-file `.exe` installer in the style of InstallShield / MSI - but
-written in Rust and built around the same BLAKE3 + HDiffPatch manifest format
-used by the sibling RustUpdater project.
+written in Rust and built around a BLAKE3 + HDiffPatch manifest format.
 
 Each output `.exe` carries its own payload: the file zip is appended as a PE
 **overlay** (no size ceiling, streamed on at build, mmap-read at install), while
@@ -236,7 +235,7 @@ only matters for *first* installs.
 
 **Proposed location, in priority order:**
 
-1. An explicit path argument (`--silent`/`--minimal "<dir>"` or `RUSTINSTALLER_PATH`).
+1. An explicit path argument (`--silent`/`--minimal "<dir>"` or `INSTALLWAY_PATH`).
 2. **The folder the product was last installed to** (reinstall/upgrade lands in
    place; the Choose page is skipped as above).
 3. The build's `--default-install-dir` (per-app, `%VAR%` tokens expanded, e.g.
@@ -271,7 +270,7 @@ App icon on the left (extracted from the installer's own embedded icon), title
 + version + progress bar + current-file status on the right. Closes itself
 ~0.9 s after reaching 100 %; on error it stays open with the message. Same
 data-safe pre-flight as every install (closes the running app first, disk
-check, etc.). Path resolves from the argument, `RUSTINSTALLER_PATH`, or the
+check, etc.). Path resolves from the argument, `INSTALLWAY_PATH`, or the
 default install dir. Implementation: [installer/src/ui/minimal.rs](installer/src/ui/minimal.rs).
 
 ### Silent (`/S` style, IT-friendly)
@@ -652,7 +651,7 @@ calls before `init()` are no-ops.
 Installer + uninstaller pick the UI language in this order:
 
 1. `--lang <code>` CLI flag (e.g. `--lang fr`)
-2. `RUSTINSTALLER_LANG` env var
+2. `INSTALLWAY_LANG` env var
 3. OS user locale via `GetUserDefaultLocaleName` (first 2 ISO-639 chars)
 4. English fallback
 

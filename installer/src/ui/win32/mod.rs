@@ -152,7 +152,7 @@ unsafe fn create_window(
         let hinstance = GetModuleHandleW(PCWSTR::null())?;
         let hicon = helpers::own_icon();
 
-        let class_name = w!("RustInstallerWnd");
+        let class_name = w!("InstallwayWnd");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: WNDCLASS_STYLES(0),

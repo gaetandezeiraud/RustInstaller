@@ -340,7 +340,7 @@ fn build_patch(
 
     // Per-file work: hash new, hash old if present, generate patch if both exist + differ.
     let temp_patches = std::env::temp_dir().join(format!(
-        "rustinstaller-patches-{}",
+        "installway-patches-{}",
         std::process::id()
     ));
     fs::create_dir_all(&temp_patches)?;

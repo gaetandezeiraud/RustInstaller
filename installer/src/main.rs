@@ -50,14 +50,14 @@ fn run() -> Result<()> {
     // path picker or buttons - just icon + progress.
     if let Some(idx) = args.iter().position(|a| a == "--minimal" || a == "/minimal") {
         let path = path_arg(&args, idx)
-            .or_else(|| std::env::var("RUSTINSTALLER_PATH").ok())
+            .or_else(|| std::env::var("INSTALLWAY_PATH").ok())
             .unwrap_or_else(|| default_install_path(&loaded.payload).to_string_lossy().into_owned());
         return ui::minimal::run(loaded, PathBuf::from(path), launch, translator);
     }
 
     if let Some(idx) = args.iter().position(|a| a == "--silent" || a == "/S") {
         let path = path_arg(&args, idx)
-            .or_else(|| std::env::var("RUSTINSTALLER_PATH").ok())
+            .or_else(|| std::env::var("INSTALLWAY_PATH").ok())
             .unwrap_or_else(|| default_install_path(&loaded.payload).to_string_lossy().into_owned());
         return run_silent(&loaded, PathBuf::from(path), launch);
     }

@@ -9,7 +9,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     if env::var_os("CARGO_CFG_WINDOWS").is_some() {
-        let m = new_manifest("RustInstaller.Installer")
+        let m = new_manifest("Installway.Installer")
             .requested_execution_level(ExecutionLevel::AsInvoker);
         embed_manifest(m).expect("embed installer manifest");
     }
