@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use common::models::{InstallInfo, Manifest};
+use common::utils::{FS_RETRIES, FS_RETRY_DELAY};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,12 +48,14 @@ fn schedule_delete_on_reboot(path: &Path) -> bool {
 /// Remove a file, surviving transient AV/indexer locks via the shared retry
 /// policy; if still locked, fall back to a reboot-time delete.
 fn remove_file_robust(path: &Path) -> Removal {
-    if !path.exists() {
-        return Removal::Absent;
+    for _ in 0..FS_RETRIES {
+        match fs::remove_file(path) {
+            Ok(()) => return Removal::Removed,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Removal::Absent,
+            Err(_) => std::thread::sleep(FS_RETRY_DELAY),
+        }
     }
-    if common::utils::remove_file_retry(path).is_ok() {
-        return Removal::Removed;
-    }
+    // Exhausted retries — the file is persistently locked.
     if schedule_delete_on_reboot(path) {
         Removal::Pending
     } else {
@@ -114,7 +117,12 @@ pub fn remove_payload_files(install_dir: &Path, manifest: &Manifest) -> usize {
 
 pub fn remove_shortcuts(product: &str) {
     for p in common::shortcuts::paths_for(product) {
-        let _ = remove_file_robust(&p);
+        match remove_file_robust(&p) {
+            Removal::Absent => common::log::warn(format!("could not remove shortcut (absent): {}", p.display())),
+            Removal::Removed => {},
+            Removal::Pending => common::log::warn(format!("shortcut deletion will be delayed for next reboot: {}", p.display())),
+            Removal::Stuck => common::log::warn(format!("could not remove shortcut (locked): {}", p.display())),
+        }
     }
 }
 

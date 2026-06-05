@@ -66,6 +66,19 @@ pub fn remove_file_retry(path: &Path) -> Result<()> {
     ))
 }
 
+/// Recursively remove a directory, retrying through transient locks.
+pub fn remove_dir_retry(dir: &Path) {
+    for _ in 0..FS_RETRIES {
+        if !dir.exists() {
+            return;
+        }
+        if fs::remove_dir_all(dir).is_ok() {
+            return;
+        }
+        std::thread::sleep(FS_RETRY_DELAY);
+    }
+}
+
 /// Copy `src` → `dest`, retrying transient locks. Mainly for copying an `.exe`
 /// (the prime AV-scan target) into a scratch location, where a bare `fs::copy`
 /// can lose to the real-time scan of the freshly written file.

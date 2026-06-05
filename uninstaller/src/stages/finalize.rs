@@ -1,74 +1,72 @@
-//! Stage 2: runs from `%TEMP%` after Stage 1 spawned us. Waits for Stage 1 to
-//! exit (releasing the `uninstall.exe` lock), removes the app dir and data dir,
-//! then schedules its own removal via `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)`.
-//! No `cmd.exe`, no console flash.
+//! Finalize step: runs from `%TEMP%` after the uninstall step spawned us. Waits for
+//! the uninstall step to exit (releasing the `uninstall.exe` lock), removes the app
+//! dir and data dir, then schedules its own removal via
+//! `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)`. No `cmd.exe`, no console flash.
 
 use crate::ui::{self, StepCounter, UninstallParams};
 use anyhow::Result;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 pub fn run(
-    app_dir: PathBuf,
+    app_dir: Option<PathBuf>,
     data_dir: PathBuf,
     product: String,
     parent_pid: Option<u32>,
 ) -> Result<()> {
-    // Continue stage 1's log file (keyed by stage 1's PID) so the whole
+    // Continue the uninstall step's log file (keyed by its PID) so the whole
     // uninstall is in one %TEMP% file for support.
     let log_id = parent_pid.unwrap_or_else(std::process::id);
-    common::log::init(common::log::log_path_for_stage2(&product, log_id));
+    common::log::init(common::log::log_path_uninstall_temp(&product, log_id));
     common::log::info(format!(
-        "stage2 start: product={} app_dir={} data_dir={} parent_pid={:?}",
+        "finalize start: product={} app_dir={} data_dir={} parent_pid={:?}",
         product,
-        app_dir.display(),
+        app_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<none>".into()),
         data_dir.display(),
         parent_pid
     ));
 
-    let app_dir_w = app_dir.clone();
-    let data_dir_w = data_dir.clone();
-
+    // `app_dir` (Option<PathBuf>) and `data_dir` (PathBuf) are moved directly
+    // into the closure — intermediate clones are no longer needed.
     let tr = crate::ui::tr();
     let params = UninstallParams {
-        title: tr.fmt("uninstall.stage2_title", &[("product", &product)]),
-        subtitle: tr.get("uninstall.stage2_subtitle"),
+        title: tr.fmt("uninstall.finalize_title", &[("product", &product)]),
+        subtitle: tr.get("uninstall.finalize_subtitle"),
         confirm_text: String::new(), // never shown - we auto-advance to Progress
         worker: Box::new(move |progress: Arc<dyn Fn(u64, u64, &str) + Send + Sync>| {
+
+            let counter = StepCounter::new(4, progress);
+            counter.step(&tr.get("uninstall.waiting"));
             let tr = crate::ui::tr();
-            // Wait for Stage 1 to exit so file locks release.
+            // Wait for the uninstall step to exit so file locks release.
             if let Some(pid) = parent_pid {
                 wait_for_pid(pid, Duration::from_secs(10));
             }
 
-            let counter = StepCounter::new(5, progress);
-            counter.step(&tr.get("uninstall.waiting"));
-            counter.step(&tr.get("uninstall.removing_uninstaller"));
-            counter.step(&tr.get("uninstall.removing_state2"));
-
-            // Remove the application dir (may be empty / already gone).
-            if !app_dir_w.as_os_str().is_empty() {
-                remove_dir_retry(&app_dir_w);
+            counter.step(&tr.get("uninstall.removing_install_dir"));
+            // Remove the application dir; absent when metadata was unreadable.
+            if let Some(ref dir) = app_dir {
+                common::utils::remove_dir_retry(dir);
             }
 
             // Remove the data dir we were launched from (the running copy is
             // the %TEMP% one, so the original is free to delete).
-            remove_dir_retry(&data_dir_w);
+            common::utils::remove_dir_retry(&data_dir);
             // Best-effort: prune now-empty parent folders (Uninstall, publisher).
-            if let Some(parent) = data_dir_w.parent() {
+            if let Some(parent) = data_dir.parent() {
                 let _ = fs::remove_dir(parent); // "Uninstall"
                 if let Some(grand) = parent.parent() {
                     let _ = fs::remove_dir(grand); // "<publisher>"
                 }
             }
-            counter.step(&tr.get("uninstall.removing_install_dir"));
 
+            counter.step(&tr.get("uninstall.schedule_deletion"));
             // Schedule self for deletion on next reboot (no cmd, no flash).
             schedule_self_delete_on_reboot();
-            common::log::info("stage2 complete; self scheduled for delete-on-reboot");
+            common::log::info("finalize complete; self scheduled for delete-on-reboot");
             counter.step(&tr.get("uninstall.done"));
 
             // Brief pause so user sees the 100% bar.
@@ -79,19 +77,6 @@ pub fn run(
 
     let _ = ui::run(params);
     Ok(())
-}
-
-/// Recursively remove a directory, retrying through transient locks.
-fn remove_dir_retry(dir: &Path) {
-    for _ in 0..30 {
-        if !dir.exists() {
-            return;
-        }
-        if fs::remove_dir_all(dir).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
 }
 
 fn wait_for_pid(pid: u32, timeout: Duration) {

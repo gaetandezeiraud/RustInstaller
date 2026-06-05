@@ -134,7 +134,7 @@ pub fn log_path_for_uninstall(install_dir: &Path) -> PathBuf {
 }
 
 #[allow(dead_code)]
-pub fn log_path_for_stage2(product: &str, pid: u32) -> PathBuf {
+pub fn log_path_uninstall_temp(product: &str, pid: u32) -> PathBuf {
     let name = crate::paths::sanitize_component(product);
     std::env::temp_dir().join(format!("{}-uninstall-{}.log", name, pid))
 }
